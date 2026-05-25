@@ -670,16 +670,17 @@ class FrontEnd(mp.Process):
                               last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
                 
-                window_not_full = len(self.current_window) < self.window_size
+                window_full = len(self.current_window) >= self.window_size
 
                 create_kf = self.is_keyframe(
                     cur_frame_idx,
                     last_keyframe_idx,
                     curr_visibility,
                     self.occ_aware_visibility,
-                    window_not_full,  # if there were not enough frames seen yet (< window_size) we perform distance-based keyframe selection too.
+                    check_pose_delta=window_full # if the window is full, we check the pose delta (i.e., distance to last keyframe)
                 )
-                if self.single_thread or window_not_full:
+                # if single threaded, or the window is not full, we use the frame interval as another condition
+                if self.single_thread or not window_full:
                     create_kf = check_time and create_kf
                 if create_kf:
                     self.current_window, removed = self.add_to_window(
