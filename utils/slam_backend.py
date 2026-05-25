@@ -353,7 +353,8 @@ class BackEnd(mp.Process):
                     viewpoint = viewpoint_stack[cam_idx]
                     if viewpoint.uid == 0:
                         continue
-                    update_pose(viewpoint)
+                    tracking_conv_th = float(self.config["Training"].get("tracking_convergence_threshold", 1e-5))
+                    update_pose(viewpoint, tracking_conv_th)
         return gaussian_split
 
     def color_refinement(self):

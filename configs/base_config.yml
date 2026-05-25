@@ -54,6 +54,7 @@ Training:
   single_thread: false                                     
   spherical_harmonics: false
   tracking_itr_num: 50                                      # Max number of tracking iterations
+  tracking_convergence_threshold: 1e-5                      # Threshold for tracking convergence
   window_size: 8                                            # Number of past keyframes considered for mapping and tracking
   kf_remove_interval: 12                                    # Number of new keyframes before keyframe removal procedure is run
 model_params:

@@ -83,6 +83,7 @@ class FrontEnd(mp.Process):
         self.save_trj_kf_intv = self.config["Results"]["save_trj_kf_intv"]
 
         self.tracking_itr_num = self.config["Training"]["tracking_itr_num"]
+        self.tracking_conv_th = float(self.config["Training"].get("tracking_convergence_threshold", 1e-5))
         self.kf_interval = self.config["Training"]["kf_interval"]
         self.window_size = self.config["Training"]["window_size"]
         self.single_thread = self.config["Training"]["single_thread"]
@@ -281,7 +282,7 @@ class FrontEnd(mp.Process):
 
             with torch.no_grad():
                 pose_optimizer.step()
-                converged = update_pose(viewpoint)
+                converged = update_pose(viewpoint, self.tracking_conv_th)
 
             if self.use_gui and self.gui_active and tracking_itr % 10 == 0:
                 self.q_main2vis.put(
