@@ -42,6 +42,8 @@ class SLAM_GUI:
         # If True the GUI will quit automatically when a finish signal is received.
         self.exit_gui_on_finish = True
         self.control_panel_visible = True
+        self.fly_move_step = 0.05
+        self._arrow_keys_pressed: set[str] = set()
 
         self.frustum_dict = {}
         self.model_dict = {}
@@ -228,6 +230,15 @@ class SLAM_GUI:
         slider_tile.add_child(self.scaling_slider)
         self.panel.add_child(slider_tile)
 
+        fly_speed_tile = gui.Horiz(0.5 * em, gui.Margins(margin))
+        fly_speed_label = gui.Label("Fly Speed")
+        self.fly_speed_slider = gui.Slider(gui.Slider.DOUBLE)
+        self.fly_speed_slider.set_limits(0.001, 0.1)
+        self.fly_speed_slider.double_value = self.fly_move_step
+        fly_speed_tile.add_child(fly_speed_label)
+        fly_speed_tile.add_child(self.fly_speed_slider)
+        self.panel.add_child(fly_speed_tile)
+
         # screenshot buttom
         self.panel.add_child(gui.Label("Capture Options"))
         self.screenshot_btn = gui.Button("Screenshot")
@@ -398,6 +409,23 @@ class SLAM_GUI:
         return True  # False would cancel the close
     
     def _on_key(self, event):
+        key_to_dir = {
+            gui.KeyName.UP: "forward",
+            gui.KeyName.DOWN: "backward",
+            gui.KeyName.LEFT: "left",
+            gui.KeyName.RIGHT: "right",
+        }
+
+        if event.key in key_to_dir:
+            direction = key_to_dir[event.key]
+            key_repeat = getattr(gui.KeyEvent, "REPEAT", None)
+            if event.type == gui.KeyEvent.DOWN or (
+                key_repeat is not None and event.type == key_repeat
+            ):
+                self._arrow_keys_pressed.add(direction)
+            elif event.type == gui.KeyEvent.UP:
+                self._arrow_keys_pressed.discard(direction)
+
         if event.key == gui.KeyName.H and event.type == gui.KeyEvent.DOWN:
             self.control_panel_visible = not self.control_panel_visible
             self.panel.visible = self.control_panel_visible
@@ -408,6 +436,51 @@ class SLAM_GUI:
             self.capture_video_switch.is_on = not self.capture_video_switch.is_on
             self._on_capture_video_switch(self.capture_video_switch.is_on)
             Log(f"Toggle video capture: {self.capture_video_switch.is_on}", tag="GUI")
+
+    def _apply_arrow_key_camera_motion(self):
+        if not self._arrow_keys_pressed:
+            return
+        # Keep follow-camera controls authoritative when enabled.
+        if self.followcam_chbox.checked:
+            return
+
+        w2c = cv_gl @ self.widget3d.scene.camera.get_view_matrix()
+        c2w = np.linalg.inv(w2c)
+
+        eye = c2w[:3, 3].astype(np.float64)
+        rot = c2w[:3, :3].astype(np.float64)
+
+        forward = rot @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        up = rot @ np.array([0.0, -1.0, 0.0], dtype=np.float64)
+        right = np.cross(forward, up)
+
+        if np.linalg.norm(forward) < 1e-8 or np.linalg.norm(up) < 1e-8 or np.linalg.norm(right) < 1e-8:
+            return
+
+        forward = forward / np.linalg.norm(forward)
+        up = up / np.linalg.norm(up)
+        right = right / np.linalg.norm(right)
+
+        move = np.zeros(3, dtype=np.float64)
+        if "forward" in self._arrow_keys_pressed:
+            move += forward
+        if "backward" in self._arrow_keys_pressed:
+            move -= forward
+        if "left" in self._arrow_keys_pressed:
+            move -= right
+        if "right" in self._arrow_keys_pressed:
+            move += right
+
+        move_norm = np.linalg.norm(move)
+        if move_norm < 1e-8:
+            return
+
+        speed = self.fly_speed_slider.double_value
+        move = move / move_norm
+        eye = eye + move * speed
+        center = eye + forward
+
+        self.widget3d.look_at(center, eye, up)
 
 
     def _on_combo_kf(self, new_val, new_idx):
@@ -971,6 +1044,7 @@ class SLAM_GUI:
     def scene_update(self):
         self.rendered_frames += 1
         self.receive_data(self.q_main2vis)
+        # self._apply_arrow_key_camera_motion()
         self.render_gui()
         if (self.capture_video_switch.is_on):
             self.write_rendered_image(self.rendered_frames)
@@ -990,6 +1064,10 @@ class SLAM_GUI:
                 break
 
             def update():
+                # Apply keyboard translation on every UI tick so it stays smooth
+                # while the user is also rotating/panning with the mouse.
+                self._apply_arrow_key_camera_motion()
+
                 if self.step % 3 == 0:
                     self.scene_update()
 
