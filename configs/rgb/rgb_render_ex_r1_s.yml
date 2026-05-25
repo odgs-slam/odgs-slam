@@ -1,0 +1,11 @@
+inherit_from: configs/rgb/rgb_config.yml
+Dataset:
+  Calibration:
+    cx: 480.0
+    cy: 960.0
+    depth_scale: 1000.0
+    height: 960
+    width: 1920
+  dataset_path: ./data/indoor_room_synthetic/renders_room_exploration_1_Ex1/Stitched/
+  inv_depth: true
+  image_downsample: 1

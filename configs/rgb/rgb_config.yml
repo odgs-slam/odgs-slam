@@ -1,0 +1,10 @@
+inherit_from: configs/base_config.yml
+Dataset:
+  sensor_type: monocular
+Results:
+  eval_rendering: true
+  save_dir: "results/rgb"
+Training:
+  size_threshold: 20                                        # Maximum size on screen threshold for pruning
+  kf_remove_min_dist: 0.1
+  kf_remove_similarity_threshold: 0.1

@@ -11,16 +11,18 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 import torch
-import torch.nn.functional as F
 from OpenGL import GL as gl
 
-from gaussian_splatting.gaussian_renderer import render
+from gaussian_splatting.gaussian_renderer import render_pinhole, render_spherical
 from gaussian_splatting.utils.graphics_utils import fov2focal, getWorld2View2
+from gui import video_writer
 from gui.gl_render import util, util_gau
 from gui.gl_render.render_ogl import OpenGLRenderer
 from gui.gui_utils import (
     GaussianPacket,
     Packet_vis2main,
+    ParamsGUI,
+    clear_queue,
     create_frustum,
     cv_gl,
     get_latest_queue,
@@ -32,10 +34,14 @@ o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 
 
 class SLAM_GUI:
-    def __init__(self, params_gui=None):
+    def __init__(self, params_gui: ParamsGUI | None = None):
         self.step = 0
+        self.rendered_frames = 0
         self.process_finished = False
         self.device = "cuda"
+        # If True the GUI will quit automatically when a finish signal is received.
+        self.exit_gui_on_finish = True
+        self.control_panel_visible = True
 
         self.frustum_dict = {}
         self.model_dict = {}
@@ -43,21 +49,27 @@ class SLAM_GUI:
         self.init_widget()
 
         self.q_main2vis = None
-        self.gaussian_cur = None
+        self.q_vis2main = None
+        self.gaussian_cur: GaussianPacket | None = None
         self.pipe = None
-        self.background = None
+        bg_color = [0, 0, 0]
+        self.background: torch.Tensor = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         self.init = False
         self.kf_window = None
         self.render_img = None
+        self.active_kf_ids = set()
+        self.save_path = pathlib.Path(".")
 
         if params_gui is not None:
             self.background = params_gui.background
-            self.gaussian_cur = params_gui.gaussians
+            # self.gaussian_cur = params_gui.gaussians
             self.init = True
             self.q_main2vis = params_gui.q_main2vis
             self.q_vis2main = params_gui.q_vis2main
             self.pipe = params_gui.pipe
+            self.exit_gui_on_finish = params_gui.exit_gui_on_finish
+            self.save_path = pathlib.Path(params_gui.output_dir)
 
         self.gaussian_nums = []
 
@@ -65,14 +77,15 @@ class SLAM_GUI:
         self.window_gl = self.init_glfw()
         self.g_renderer = OpenGLRenderer(self.g_camera.w, self.g_camera.h)
 
-        gl.glEnable(gl.GL_TEXTURE_2D)
+        # gl.glEnable(gl.GL_TEXTURE_2D)
         gl.glEnable(gl.GL_DEPTH_TEST)
         gl.glDepthFunc(gl.GL_LEQUAL)
         self.gaussians_gl = util_gau.GaussianData(0, 0, 0, 0, 0)
-
-        self.save_path = "."
-        self.save_path = pathlib.Path(self.save_path)
-        self.save_path.mkdir(parents=True, exist_ok=True)
+        
+        self.video_writer_gui = None
+        self.video_writer_3dgs = None
+        self.frames_path_gui = None
+        self.frames_path_3dgs = None
 
         threading.Thread(target=self._update_thread).start()
 
@@ -80,10 +93,11 @@ class SLAM_GUI:
         self.window_w, self.window_h = 1600, 900
 
         self.window = gui.Application.instance.create_window(
-            "MonoGS", self.window_w, self.window_h
+            "ODGS-SLAM", self.window_w, self.window_h
         )
         self.window.set_on_layout(self._on_layout)
         self.window.set_on_close(self._on_close)
+        self.window.set_on_key(self._on_key)
         self.widget3d = gui.SceneWidget()
         self.widget3d.scene = rendering.Open3DScene(self.window.renderer)
 
@@ -113,10 +127,15 @@ class SLAM_GUI:
         em = self.window.theme.font_size
         margin = 0.5 * em
         self.panel = gui.Vert(0.5 * em, gui.Margins(margin))
-        self.button = gui.ToggleSwitch("Resume/Pause")
+        self.button = gui.ToggleSwitch("Pause/Play")
         self.button.is_on = True
         self.button.set_on_clicked(self._on_button)
         self.panel.add_child(self.button)
+
+        self.gui_active_chbox = gui.Checkbox("GUI active")
+        self.gui_active_chbox.checked = True
+        self.gui_active_chbox.set_on_checked(self._on_gui_active_chbox)
+        self.panel.add_child(self.gui_active_chbox)
 
         self.panel.add_child(gui.Label("Viewpoint Options"))
 
@@ -124,7 +143,7 @@ class SLAM_GUI:
         vp_subtile1 = gui.Vert(0.5 * em, gui.Margins(margin))
         vp_subtile2 = gui.Vert(0.5 * em, gui.Margins(margin))
 
-        ##Check boxes
+        # Check boxes
         vp_subtile1.add_child(gui.Label("Camera follow options"))
         chbox_tile = gui.Horiz(0.5 * em, gui.Margins(margin))
         self.followcam_chbox = gui.Checkbox("Follow Camera")
@@ -136,10 +155,10 @@ class SLAM_GUI:
         chbox_tile.add_child(self.staybehind_chbox)
         vp_subtile1.add_child(chbox_tile)
 
-        ##Combo panels
+        # Combo panels
         combo_tile = gui.Vert(0.5 * em, gui.Margins(margin))
 
-        ## Jump to the camera viewpoint
+        # Jump to the camera viewpoint
         self.combo_kf = gui.Combobox()
         self.combo_kf.set_on_selection_changed(self._on_combo_kf)
         combo_tile.add_child(gui.Label("Viewpoint list"))
@@ -167,6 +186,19 @@ class SLAM_GUI:
         self.axis_chbox.set_on_checked(self._on_axis_chbox)
         chbox_tile_3dobj.add_child(self.axis_chbox)
 
+        self.gt_points_chbox = gui.Checkbox("GT Points")
+        self.gt_points_chbox.checked = False
+        self.gt_points_chbox.set_on_checked(self._on_gt_points_chbox)
+        chbox_tile_3dobj.add_child(self.gt_points_chbox)
+
+        self.panel.add_child(gui.Label("Camera model"))
+        chbox_tile_cam_model = gui.Horiz(0.5 * em, gui.Margins(margin))
+        self.spherical_chbox = gui.Checkbox("Use Spherical Rendering")
+        self.spherical_chbox.checked = False
+        self.spherical_chbox.set_on_checked(self._on_spherical_chbox)
+        chbox_tile_cam_model.add_child(self.spherical_chbox)
+        self.panel.add_child(chbox_tile_cam_model)
+
         self.panel.add_child(gui.Label("Rendering options"))
         chbox_tile_geometry = gui.Horiz(0.5 * em, gui.Margins(margin))
 
@@ -185,7 +217,6 @@ class SLAM_GUI:
         self.elipsoid_chbox = gui.Checkbox("Elipsoid Shader")
         self.elipsoid_chbox.checked = False
         chbox_tile_geometry.add_child(self.elipsoid_chbox)
-
         self.panel.add_child(chbox_tile_geometry)
 
         slider_tile = gui.Horiz(0.5 * em, gui.Margins(margin))
@@ -198,13 +229,38 @@ class SLAM_GUI:
         self.panel.add_child(slider_tile)
 
         # screenshot buttom
+        self.panel.add_child(gui.Label("Capture Options"))
         self.screenshot_btn = gui.Button("Screenshot")
         self.screenshot_btn.set_on_clicked(
             self._on_screenshot_btn
         )  # set the callback function
         self.panel.add_child(self.screenshot_btn)
 
-        ## Rendering Tab
+        video_tile = gui.Horiz(0.5 * em, gui.Margins(margin))
+        self.capture_video_switch = gui.ToggleSwitch("Capture video: Off/On")
+        self.capture_video_switch.is_on = False
+        self.capture_video_switch.set_on_clicked(self._on_capture_video_switch)
+        video_tile.add_child(self.capture_video_switch)
+        self.video_output_type_chbox = gui.Checkbox("Output video")
+        self.video_output_type_chbox.checked = True
+        video_tile.add_child(self.video_output_type_chbox)
+        self.images_output_type_chbox = gui.Checkbox("Output images")
+        self.images_output_type_chbox.checked = False
+        video_tile.add_child(self.images_output_type_chbox)
+        self.panel.add_child(video_tile)
+
+        self.panel.add_child(gui.Label("Capture target"))
+        video_target_chbox_tile = gui.Horiz(0.5 * em, gui.Margins(margin))
+        self.capture_with_gui_chbox = gui.Checkbox("Capture with GUI")
+        self.capture_with_gui_chbox.checked = False
+        video_target_chbox_tile.add_child(self.capture_with_gui_chbox)
+        self.capture_with_3dgs_chbox = gui.Checkbox("Capture 3DGS only")
+        self.capture_with_3dgs_chbox.checked = False
+        video_target_chbox_tile.add_child(self.capture_with_3dgs_chbox)
+        self.panel.add_child(video_target_chbox_tile)
+        
+
+        # Rendering Tab
         tab_margins = gui.Margins(0, int(np.round(0.5 * em)), 0, 0)
         tabs = gui.TabControl()
 
@@ -217,6 +273,7 @@ class SLAM_GUI:
         tab_info.add_child(gui.Label("Input Color/Depth"))
         tab_info.add_child(self.in_rgb_widget)
         tab_info.add_child(self.in_depth_widget)
+        tab_info.add_child(gui.Label("Press 'H' to hide/show control panel."))
 
         tabs.add_tab("Info", tab_info)
         self.panel.add_child(tabs)
@@ -249,7 +306,20 @@ class SLAM_GUI:
         self.g_renderer.update_camera_intrin(self.g_camera)
         self.g_renderer.set_render_reso(self.g_camera.w, self.g_camera.h)
 
-    def add_camera(self, camera, name, color=[0, 1, 0], gt=False, size=0.01):
+    # def add_camera(self, camera, name, color=[0, 1, 0], gt=False, radius=1.0, num_points=100):
+        #     W2C = (
+        #         getWorld2View2(camera.R_gt, camera.T_gt)
+        #         if gt
+        #         else getWorld2View2(camera.R, camera.T)
+        #     )
+        #     W2C = W2C.cpu().numpy()
+        #     C2W = np.linalg.inv(W2C)
+        #     frustum = create_spherical_frustum(C2W, color, radius=radius, num_points=num_points)
+        #     if name not in self.frustum_dict.keys():
+        #         frustum = create_spherical_frustum(C2W, color, radius=radius, num_points=num_points)
+    def add_camera(self, camera, name, color=None, gt=False, size=0.01):
+        if color is None:
+            color = [0, 1, 0]
         W2C = (
             getWorld2View2(camera.R_gt, camera.T_gt)
             if gt
@@ -258,40 +328,87 @@ class SLAM_GUI:
         W2C = W2C.cpu().numpy()
         C2W = np.linalg.inv(W2C)
         frustum = create_frustum(C2W, color, size=size)
-        if name not in self.frustum_dict.keys():
+        if name not in self.frustum_dict:
             frustum = create_frustum(C2W, color)
             self.combo_kf.add_item(name)
             self.frustum_dict[name] = frustum
             self.widget3d.scene.add_geometry(name, frustum.line_set, self.lit)
         frustum = self.frustum_dict[name]
         frustum.update_pose(C2W)
-        self.widget3d.scene.set_geometry_transform(name, C2W.astype(np.float64))
+        self.widget3d.scene.set_geometry_transform(
+            name, C2W.astype(np.float64))
         self.widget3d.scene.show_geometry(name, self.cameras_chbox.checked)
         return frustum
 
+    def add_gt_point(self, camera, name):
+        W2C_gt = getWorld2View2(camera.R_gt, camera.T_gt)
+        W2C_gt = W2C_gt.cpu().numpy()
+        C2W_gt = np.linalg.inv(W2C_gt)
+        # add gt point
+        gt_name = f"{name}_gt"
+        gt_point = o3d.geometry.TriangleMesh.create_sphere(radius=0.002)
+        gt_point.paint_uniform_color([1, 0, 0])
+        gt_point.translate(C2W_gt[:3, 3])
+        self.widget3d.scene.add_geometry(gt_name, gt_point, self.lit_geo)
+        self.widget3d.scene.show_geometry(gt_name, self.gt_points_chbox.checked)
+        
+        # add line from camera to gt point
+        start = gt_point.get_center()
+        end = self.frustum_dict[name].view_dir[1]
+        if np.linalg.norm(start - end) > 0.002:
+            points = [start, end]
+            lines = [[0, 1]]
+            colors = [[1, 0, 0]]
+            line_set = o3d.geometry.LineSet()
+            line_set.points = o3d.utility.Vector3dVector(points)
+            line_set.colors = o3d.utility.Vector3dVector(colors)
+            line_set.lines = o3d.utility.Vector2iVector(lines)
+            edge_name = f"{name}_gt_line"
+            self.widget3d.scene.add_geometry(edge_name, line_set, self.lit)
+            self.widget3d.scene.show_geometry(edge_name, self.gt_points_chbox.checked)
+
+
     def _on_layout(self, layout_context):
         contentRect = self.window.content_rect
-        self.widget3d_width_ratio = 0.7
+        if self.control_panel_visible:
+            self.widget3d_width_ratio = 0.7
+        else:
+            self.widget3d_width_ratio = 1.0
         self.widget3d_width = int(
             self.window.size.width * self.widget3d_width_ratio
         )  # 15 ems wide
         self.widget3d.frame = gui.Rect(
             contentRect.x, contentRect.y, self.widget3d_width, contentRect.height
         )
-        self.panel.frame = gui.Rect(
-            self.widget3d.frame.get_right(),
-            contentRect.y,
-            contentRect.width - self.widget3d_width,
-            contentRect.height,
-        )
+        if self.control_panel_visible:
+            self.panel.frame = gui.Rect(
+                self.widget3d.frame.get_right(),
+                contentRect.y,
+                contentRect.width - self.widget3d_width,
+                contentRect.height,
+            )
 
     def _on_close(self):
-        self.is_done = True
+        if self.q_vis2main is not None:
+            packet = Packet_vis2main(flag_gui_exit=True)
+            self.q_vis2main.put(packet)
+        self.q_main2vis = None
+        self.q_vis2main = None
+        self.process_finished = True
         return True  # False would cancel the close
+    
+    def _on_key(self, event):
+        if event.key == gui.KeyName.H and event.type == gui.KeyEvent.DOWN:
+            self.control_panel_visible = not self.control_panel_visible
+            self.panel.visible = self.control_panel_visible
+            self._on_layout(None)
+            Log(f"Toggle control panel visibile: {self.control_panel_visible}", tag="GUI")
+            
+        if event.key == gui.KeyName.C and event.type == gui.KeyEvent.DOWN:
+            self.capture_video_switch.is_on = not self.capture_video_switch.is_on
+            self._on_capture_video_switch(self.capture_video_switch.is_on)
+            Log(f"Toggle video capture: {self.capture_video_switch.is_on}", tag="GUI")
 
-    def _on_combo_model(self, new_val, new_idx):
-        model_idx = self.model_dict[new_val]
-        self.global_map.active_map_idx = model_idx
 
     def _on_combo_kf(self, new_val, new_idx):
         frustum = self.frustum_dict[new_val]
@@ -316,14 +433,14 @@ class SLAM_GUI:
         if self.kf_window is None:
             return
         edge_cnt = 0
-        for key in self.kf_window.keys():
+        for key in self.kf_window:
             for kf_idx in self.kf_window[key]:
-                name = "kf_edge_{}".format(edge_cnt)
+                name = f"kf_edge_{edge_cnt}"
                 edge_cnt += 1
-                if "keyframe_{}".format(key) not in self.frustum_dict.keys():
+                if f"keyframe_{key}" not in self.frustum_dict:
                     continue
-                test1 = self.frustum_dict["keyframe_{}".format(key)].view_dir[1]
-                kf = self.frustum_dict["keyframe_{}".format(kf_idx)].view_dir[1]
+                test1 = self.frustum_dict[f"keyframe_{key}"].view_dir[1]
+                kf = self.frustum_dict[f"keyframe_{kf_idx}"].view_dir[1]
                 points = [test1, kf]
                 lines = [[0, 1]]
                 colors = [[0, 1, 0]]
@@ -340,67 +457,200 @@ class SLAM_GUI:
                     self.widget3d.scene.remove_geometry(name)
 
     def _on_button(self, is_on):
-        packet = Packet_vis2main()
-        packet.flag_pause = not self.button.is_on
-        self.q_vis2main.put(packet)
-
-    def _on_slider(self, value):
-        packet = self.prepare_viz2main_packet()
-        self.q_vis2main.put(packet)
-
-    def _on_render_btn(self):
-        packet = Packet_vis2main()
-        packet.flag_nextbatch = True
-        self.q_vis2main.put(packet)
+        if self.q_vis2main is not None:
+            packet = Packet_vis2main(flag_pause=not self.button.is_on)
+            self.q_vis2main.put(packet)
 
     def _on_screenshot_btn(self):
         if self.render_img is None:
             return
         dt = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        save_dir = self.save_path / "screenshots" / dt
+        save_dir = pathlib.Path(self.save_path) / "screenshots" / dt
         save_dir.mkdir(parents=True, exist_ok=True)
         # create the filename
         filename = save_dir / "screenshot"
+        current_cam = self.get_current_cam()
+        if (
+            self.gaussian_cur is not None
+            and self.gaussian_cur.gaussians is not None
+            and self.gaussian_cur.current_frame is not None
+        ):
+            current_cam.image_height = self.gaussian_cur.current_frame.image_height
+            current_cam.image_width = self.gaussian_cur.current_frame.image_width
+            with torch.no_grad():
+                results = render_spherical(
+                    current_cam,
+                    self.gaussian_cur.gaussians,
+                    self.pipe,
+                    self.background,
+                    self.scaling_slider.double_value,
+                    mapping_mode=False,
+                    tracking_mode=False
+                )
+            if results is None:
+                Log("Rendering failed, could not save screenshot!", tag="GUI")
+                return
+            # Save RGB
+            rgb = (
+                (torch.clamp(results["render"], min=0, max=1.0) * 255)
+                .byte()
+                .permute(1, 2, 0)
+                .contiguous()
+                .cpu()
+                .numpy()
+            )
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
+            cv2.imwrite(f"{filename}-spherical.png", rgb)
+            # Save Depth
+            if "depth" in results:
+                depth = results["depth"][0].detach().cpu().numpy()
+                max_depth = np.max(depth)
+                depth_vis = imgviz.depth2rgb(
+                    depth, min_value=0.1, max_value=max_depth, colormap="turbo"
+                )
+                depth_vis = cv2.cvtColor(depth_vis, cv2.COLOR_BGR2RGB)
+                cv2.imwrite(f"{filename}-spherical-depth.png", depth_vis)
+    
+    def _on_capture_video_switch(self, is_on):
+        if is_on:
+            if self.capture_with_gui_chbox.checked is False and self.capture_with_3dgs_chbox.checked is False:
+                Log("Please select at least one capture target (with GUI or 3DGS)!", tag="GUI")
+                self.capture_video_switch.is_on = False
+            if self.video_output_type_chbox.checked is False and self.images_output_type_chbox.checked is False:
+                Log("Please select at least one output type (video or images)!", tag="GUI")
+                self.capture_video_switch.is_on = False
+            if self.capture_video_switch.is_on: 
+                self.video_output_type_chbox.enabled = False
+                self.capture_with_3dgs_chbox.enabled = False
+                self.capture_with_gui_chbox.enabled = False
+        else:
+            self.video_writer_gui = None
+            self.video_writer_3dgs = None
+            self.frames_path_gui = None
+            self.frames_path_3dgs = None
+            self.video_output_type_chbox.enabled = True
+            self.capture_with_3dgs_chbox.enabled = True
+            self.capture_with_gui_chbox.enabled = True
+
+    def _on_gt_points_chbox(self, is_checked):
+        for name in self.frustum_dict:
+            gt_name = f"{name}_gt"
+            if self.widget3d.scene.has_geometry(gt_name):
+                self.widget3d.scene.show_geometry(gt_name, is_checked)
+            edge_name = f"{name}_gt_line"
+            if self.widget3d.scene.has_geometry(edge_name):
+                self.widget3d.scene.show_geometry(edge_name, is_checked)
+
+    def _on_spherical_chbox(self, is_checked):
+        if is_checked:
+            self.elipsoid_chbox.checked = False
+            self.elipsoid_chbox.enabled = False
+        else:
+            self.elipsoid_chbox.enabled = True
+            
+    def _on_gui_active_chbox(self, is_checked):
+        if self.q_vis2main is not None:
+            self.q_vis2main.put(Packet_vis2main(flag_gui_active=is_checked))
+        if not is_checked:
+            self._on_axis_chbox(is_checked=False)
+            self._on_cameras_chbox(is_checked=False)
+            self._on_kf_window_chbox(is_checked=False)
+            self._on_gt_points_chbox(is_checked=False)
+            self.axis_chbox.enabled = False
+            self.cameras_chbox.enabled = False
+            self.kf_window_chbox.enabled = False
+            self.gt_points_chbox.enabled = False
+        else:
+            self.axis_chbox.enabled = True
+            self.cameras_chbox.enabled = True
+            self.kf_window_chbox.enabled = True
+            self.gt_points_chbox.enabled = True
+            self._on_axis_chbox(is_checked=self.axis_chbox.checked)
+            self._on_cameras_chbox(is_checked=self.cameras_chbox.checked)
+            self._on_kf_window_chbox(is_checked=self.kf_window_chbox.checked)
+            self._on_gt_points_chbox(is_checked=self.gt_points_chbox.checked)
+
+
+    # @staticmethod
+    # def resize_img(img, width):
+    #     height = int(width * img.shape[0] / img.shape[1])
+    #     return cv2.resize(img, (width, height))
+
+    # def add_ids(self):
+    #     indices = (
+    #         torch.unique(
+    #             self.gaussian_cur.unique_kfIDs).cpu().numpy().astype(int)
+    #     ).tolist()
+    #     for idx in indices:
+    #         if idx in self.gaussian_id_dict.keys():
+    #             continue
+
+    #         self.gaussian_id_dict[idx] = 0
+    #         self.combo_gaussian_id.add_item(str(idx))
+    
+    def write_rendered_image(self, frame):
+        if self.render_img is None:
+            return
+
+        save_dir = self.save_path / "video"
+        save_dir.mkdir(parents=True, exist_ok=True)
         height = self.window.size.height
         width = self.widget3d_width
         app = o3d.visualization.gui.Application.instance
-        img = np.asarray(app.render_to_image(self.widget3d.scene, width, height))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(f"{filename}-gui.png", img)
-        img = np.asarray(self.render_img)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(f"{filename}.png", img)
 
-    @staticmethod
-    def resize_img(img, width):
-        height = int(width * img.shape[0] / img.shape[1])
-        return cv2.resize(img, (width, height))
+        if self.capture_with_gui_chbox.checked:
+            img_ui = np.asarray(app.render_to_image(self.widget3d.scene, width, height))
+            img_ui = cv2.cvtColor(img_ui, cv2.COLOR_BGR2RGB)
 
-    def add_ids(self):
-        indices = (
-            torch.unique(self.gaussian_cur.unique_kfIDs).cpu().numpy().astype(int)
-        ).tolist()
-        for idx in indices:
-            if idx in self.gaussian_id_dict.keys():
-                continue
+            if self.video_output_type_chbox.checked:
+                if self.video_writer_gui is None:
+                    self.video_writer_gui = video_writer.VideoWriter(save_dir / f"video_gui_start_frame{frame:06d}", img_ui.shape[1], img_ui.shape[0], fps=30)
+                try:
+                    self.video_writer_gui.write_frame(img_ui)
+                except Exception as e:
+                    Log(f"Error writing frame to video_writer_gui, resetting: {e}", tag="GUI")
+                    self.video_writer_gui = None
 
-            self.gaussian_id_dict[idx] = 0
-            self.combo_gaussian_id.add_item(str(idx))
+            if self.images_output_type_chbox.checked and self.rendered_frames % 10 == 0:
+                if self.frames_path_gui is None:
+                    self.frames_path_gui = save_dir / f"frames_gui_start_frame{frame:06d}"
+                    self.frames_path_gui.mkdir(parents=True, exist_ok=True)
+                filename = self.frames_path_gui / f"{frame:06d}"
+                cv2.imwrite(f"{filename}-gui.jpg", img_ui)
 
+        if self.capture_with_3dgs_chbox.checked:
+            img = np.asarray(self.render_img)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            if self.video_output_type_chbox.checked:
+                if self.video_writer_3dgs is None:
+                    self.video_writer_3dgs = video_writer.VideoWriter(save_dir / f"video_3dgs_start_frame{frame:06d}", img.shape[1], img.shape[0], fps=30)
+                try:
+                    self.video_writer_3dgs.write_frame(img)
+                except Exception as e:
+                    Log(f"Error writing frame to video_writer_3dgs, resetting: {e}", tag="GUI")
+                    self.video_writer_3dgs = None
+
+            if self.images_output_type_chbox.checked and self.rendered_frames % 10 == 0:
+                if self.frames_path_3dgs is None:
+                    self.frames_path_3dgs = save_dir / f"frames_3dgs_start_frame{frame:06d}"
+                    self.frames_path_3dgs.mkdir(parents=True, exist_ok=True)
+                filename = self.frames_path_3dgs / f"{frame:06d}"
+                cv2.imwrite(f"{filename}.jpg", img)
+                
     def receive_data(self, q):
-        if q is None:
-            return
+        if q is None or self.gui_active_chbox.checked is False:
+            return False
 
         gaussian_packet = get_latest_queue(q)
         if gaussian_packet is None:
-            return
+            return False
 
-        if gaussian_packet.has_gaussians:
+        update_received = False
+        if gaussian_packet.gaussians is not None:
             self.gaussian_cur = gaussian_packet
-            self.output_info.text = "Number of Gaussians: {}".format(
-                self.gaussian_cur.get_xyz.shape[0]
-            )
+            self.output_info.text = f"Number of Gaussians: {self.gaussian_cur.gaussians.get_xyz.shape[0]}"
             self.init = True
+            update_received = True
 
         if gaussian_packet.current_frame is not None:
             frustum = self.add_camera(
@@ -413,92 +663,117 @@ class SLAM_GUI:
                     else frustum.view_dir
                 )
                 self.widget3d.look_at(viewpoint[0], viewpoint[1], viewpoint[2])
-
-        if gaussian_packet.keyframe is not None:
-            name = "keyframe_{}".format(gaussian_packet.keyframe.uid)
-            frustum = self.add_camera(
-                gaussian_packet.keyframe, name=name, color=[0, 0, 1]
-            )
+            update_received = True
 
         if gaussian_packet.keyframes is not None:
             for keyframe in gaussian_packet.keyframes:
-                name = "keyframe_{}".format(keyframe.uid)
+                name = f"keyframe_{keyframe.uid}"
                 frustum = self.add_camera(keyframe, name=name, color=[0, 0, 1])
+                self.add_gt_point(keyframe, name=name)
+            update_received = True
 
         if gaussian_packet.kf_window is not None:
             self.kf_window = gaussian_packet.kf_window
             self._on_kf_window_chbox(is_checked=self.kf_window_chbox.checked)
+            update_received = True
 
         if gaussian_packet.gtcolor is not None:
-            rgb = torch.clamp(gaussian_packet.gtcolor, min=0, max=1.0) * 255
-            rgb = rgb.byte().permute(1, 2, 0).contiguous().cpu().numpy()
+            if isinstance(gaussian_packet.gtcolor, np.ndarray):
+                rgb = np.clip(gaussian_packet.gtcolor, 0, 1.0) * 255
+                rgb = rgb.astype(np.uint8)
+            else:
+                rgb = torch.clamp(gaussian_packet.gtcolor, min=0, max=1.0) * 255
+                rgb = rgb.byte().permute(1, 2, 0).contiguous().cpu().numpy()
             rgb = o3d.geometry.Image(rgb)
             self.in_rgb_widget.update_image(rgb)
+            update_received = True
 
         if gaussian_packet.gtdepth is not None:
-            depth = gaussian_packet.gtdepth
+            if isinstance(gaussian_packet.gtdepth, torch.Tensor):
+                depth = gaussian_packet.gtdepth.detach().cpu().numpy()
+            else:
+                depth = gaussian_packet.gtdepth
+            min_val = float(np.min(depth))
+            max_val = float(np.max(depth))
             depth = imgviz.depth2rgb(
-                depth, min_value=0.1, max_value=5.0, colormap="jet"
+                depth, min_value=min_val, max_value=max_val, colormap="jet"
             )
-            depth = torch.from_numpy(depth)
-            depth = torch.permute(depth, (2, 0, 1)).float()
-            depth = (depth).byte().permute(1, 2, 0).contiguous().cpu().numpy()
             rgb = o3d.geometry.Image(depth)
             self.in_depth_widget.update_image(rgb)
+            update_received = True
 
         if gaussian_packet.finish:
             Log("Received terminate signal", tag="GUI")
             # clean up the pipe
-            while not self.q_main2vis.empty():
-                self.q_main2vis.get()
-            while not self.q_vis2main.empty():
-                self.q_vis2main.get()
+            clear_queue(self.q_vis2main)
+            clear_queue(self.q_main2vis)
             self.q_vis2main = None
             self.q_main2vis = None
-            self.process_finished = True
+            if self.exit_gui_on_finish:
+                self.process_finished = True
+            update_received = True
+            
+        if hasattr(gaussian_packet, "active_kf_ids") and gaussian_packet.active_kf_ids is not None:
+            new_active_kf_ids = set(gaussian_packet.active_kf_ids)
+            inactive_kf_ids = self.active_kf_ids - new_active_kf_ids
+            for kf_id in inactive_kf_ids:
+                name = f"keyframe_{kf_id}"
+                if name in self.frustum_dict:
+                    frustum = self.frustum_dict[name]
+                    pose = frustum.pose if hasattr(frustum, "pose") else None
+                    if pose is not None:
+                        red_frustum = create_frustum(pose, frusutum_color=[1, 0, 0])
+                        self.frustum_dict[name] = red_frustum
+                        self.widget3d.scene.remove_geometry(name)
+                        self.widget3d.scene.add_geometry(name, red_frustum.line_set, self.lit)
+                        self.widget3d.scene.set_geometry_transform(name, pose.astype(np.float64))
+                        self.widget3d.scene.show_geometry(name, self.cameras_chbox.checked)
+            self.active_kf_ids = new_active_kf_ids
+            update_received = True
+        return update_received
 
-    @staticmethod
-    def depth_to_normal(points, k=3, d_min=1e-3, d_max=10.0):
-        k = (k - 1) // 2
-        # points: (B, 3, H, W)
-        b, _, h, w = points.size()
-        points_pad = F.pad(
-            points, (k, k, k, k), mode="constant", value=0
-        )  # (B, 3, k+H+k, k+W+k)
-        if d_max is not None:
-            valid_pad = (points_pad[:, 2:, :, :] > d_min) & (
-                points_pad[:, 2:, :, :] < d_max
-            )  # (B, 1, k+H+k, k+W+k)
-        else:
-            valid_pad = points_pad[:, 2:, :, :] > d_min
-        valid_pad = valid_pad.float()
+    # @staticmethod
+    # def depth_to_normal(points, k=3, d_min=1e-3, d_max=10.0):
+    #     k = (k - 1) // 2
+    #     # points: (B, 3, H, W)
+    #     b, _, h, w = points.size()
+    #     points_pad = F.pad(
+    #         points, (k, k, k, k), mode="constant", value=0
+    #     )  # (B, 3, k+H+k, k+W+k)
+    #     if d_max is not None:
+    #         valid_pad = (points_pad[:, 2:, :, :] > d_min) & (
+    #             points_pad[:, 2:, :, :] < d_max
+    #         )  # (B, 1, k+H+k, k+W+k)
+    #     else:
+    #         valid_pad = points_pad[:, 2:, :, :] > d_min
+    #     valid_pad = valid_pad.float()
 
-        # vertical vector (top - bottom)
-        vec_vert = (
-            points_pad[:, :, :h, k : w + k]
-            - points_pad[:, :, 2 * k : h + (2 * k), k : w + k]
-        )
+    #     # vertical vector (top - bottom)
+    #     vec_vert = (
+    #         points_pad[:, :, :h, k: w + k]
+    #         - points_pad[:, :, 2 * k: h + (2 * k), k: w + k]
+    #     )
 
-        # horizontal vector (left - right)
-        vec_hori = (
-            points_pad[:, :, k : h + k, :w]
-            - points_pad[:, :, k : h + k, 2 * k : w + (2 * k)]
-        )
+    #     # horizontal vector (left - right)
+    #     vec_hori = (
+    #         points_pad[:, :, k: h + k, :w]
+    #         - points_pad[:, :, k: h + k, 2 * k: w + (2 * k)]
+    #     )
 
-        # valid_mask
-        valid_mask = (
-            valid_pad[:, :, k : h + k, k : w + k]
-            * valid_pad[:, :, :h, k : w + k]
-            * valid_pad[:, :, 2 * k : h + (2 * k), k : w + k]
-            * valid_pad[:, :, k : h + k, :w]
-            * valid_pad[:, :, k : h + k, 2 * k : w + (2 * k)]
-        )
-        valid_mask = valid_mask > 0.5
+    #     # valid_mask
+    #     valid_mask = (
+    #         valid_pad[:, :, k: h + k, k: w + k]
+    #         * valid_pad[:, :, :h, k: w + k]
+    #         * valid_pad[:, :, 2 * k: h + (2 * k), k: w + k]
+    #         * valid_pad[:, :, k: h + k, :w]
+    #         * valid_pad[:, :, k: h + k, 2 * k: w + (2 * k)]
+    #     )
+    #     valid_mask = valid_mask > 0.5
 
-        # get cross product (B, 3, H, W)
-        cross_product = -torch.linalg.cross(vec_vert, vec_hori, dim=1)
-        normal = F.normalize(cross_product, p=2.0, dim=1, eps=1e-12)
-        return normal, valid_mask
+    #     # get cross product (B, 3, H, W)
+    #     cross_product = -torch.linalg.cross(vec_vert, vec_hori, dim=1)
+    #     normal = F.normalize(cross_product, p=2.0, dim=1, eps=1e-12)
+    #     return normal, valid_mask
 
     @staticmethod
     def vfov_to_hfov(vfov_deg, height, width):
@@ -514,7 +789,8 @@ class SLAM_GUI:
             (1, int(self.window.size.height), int(self.widget3d_width))
         )
         vfov_deg = self.widget3d.scene.camera.get_field_of_view()
-        hfov_deg = self.vfov_to_hfov(vfov_deg, image_gui.shape[1], image_gui.shape[2])
+        hfov_deg = self.vfov_to_hfov(
+            vfov_deg, image_gui.shape[1], image_gui.shape[2])
         FoVx = np.deg2rad(hfov_deg)
         FoVy = np.deg2rad(vfov_deg)
         fx = fov2focal(FoVx, image_gui.shape[2])
@@ -538,40 +814,68 @@ class SLAM_GUI:
         return current_cam
 
     def rasterise(self, current_cam):
-        if (
-            self.time_shader_chbox.checked
-            and self.gaussian_cur is not None
-            and type(self.gaussian_cur) == GaussianPacket
-        ):
-            features = self.gaussian_cur.get_features.clone()
-            kf_ids = self.gaussian_cur.unique_kfIDs.float()
+        if self.gaussian_cur is None or self.gaussian_cur.gaussians is None:
+            return None
+
+        if (self.time_shader_chbox.checked):
+            features = self.gaussian_cur.gaussians.get_features.clone()
+            kf_ids = self.gaussian_cur.gaussians.unique_kfIDs.float()
             rgb_kf = imgviz.depth2rgb(
                 kf_ids.view(-1, 1).cpu().numpy(), colormap="jet", dtype=np.float32
             )
             alpha = 0.1
-            self.gaussian_cur.get_features = alpha * features + (
+            self.gaussian_cur.gaussians.get_features = alpha * features + (
                 1 - alpha
             ) * torch.from_numpy(rgb_kf).to(features.device)
-            rendering_data = render(
-                current_cam,
-                self.gaussian_cur,
-                self.pipe,
-                self.background,
-                self.scaling_slider.double_value,
-            )
-            self.gaussian_cur.get_features = features
+            with torch.no_grad():
+                if self.spherical_chbox.checked:
+                    rendering_data = render_spherical(
+                        current_cam,
+                        self.gaussian_cur.gaussians,
+                        self.pipe,
+                        self.background,
+                        self.scaling_slider.double_value,
+                        mapping_mode=False,
+                        tracking_mode=False,
+                    )
+                else:
+                    rendering_data = render_pinhole(
+                        current_cam,
+                        self.gaussian_cur.gaussians,
+                        self.pipe,
+                        self.background,
+                        self.scaling_slider.double_value,
+                    )
+            self.gaussian_cur.gaussians.get_features = features
         else:
-            rendering_data = render(
-                current_cam,
-                self.gaussian_cur,
-                self.pipe,
-                self.background,
-                self.scaling_slider.double_value,
-            )
+            with torch.no_grad():
+                if self.spherical_chbox.checked:
+                    rendering_data = render_spherical(
+                        current_cam,
+                        self.gaussian_cur.gaussians,
+                        self.pipe,
+                        self.background,
+                        self.scaling_slider.double_value,
+                        tracking_mode=False,
+                        mapping_mode=False,
+                    )
+                else:
+                    rendering_data = render_pinhole(
+                        current_cam,
+                        self.gaussian_cur.gaussians,
+                        self.pipe,
+                        self.background,
+                        self.scaling_slider.double_value,
+                    )
+
         return rendering_data
 
     def render_o3d_image(self, results, current_cam):
-        if self.depth_chbox.checked:
+        if results is None:
+            # return black image if no results
+            img = np.zeros([current_cam.image_height, current_cam.image_width, 3], dtype=np.uint8)
+            render_img = o3d.geometry.Image(img)
+        elif self.depth_chbox.checked:
             depth = results["depth"]
             depth = depth[0, :, :].detach().cpu().numpy()
             max_depth = np.max(depth)
@@ -585,19 +889,23 @@ class SLAM_GUI:
 
         elif self.opacity_chbox.checked:
             opacity = results["opacity"]
-            opacity = opacity[0, :, :].detach().cpu().numpy()
+            if len(opacity.shape) == 2:
+                opacity = opacity.detach().cpu().numpy()
+            else:
+                opacity = opacity[0, :, :].detach().cpu().numpy()
             max_opacity = np.max(opacity)
             opacity = imgviz.depth2rgb(
                 opacity, min_value=0.0, max_value=max_opacity, colormap="jet"
             )
             opacity = torch.from_numpy(opacity)
             opacity = torch.permute(opacity, (2, 0, 1)).float()
-            opacity = (opacity).byte().permute(1, 2, 0).contiguous().cpu().numpy()
+            opacity = (opacity).byte().permute(
+                1, 2, 0).contiguous().cpu().numpy()
             render_img = o3d.geometry.Image(opacity)
 
         elif self.elipsoid_chbox.checked:
-            if self.gaussian_cur is None:
-                return
+            if self.gaussian_cur is None or self.gaussian_cur.gaussians is None:
+                return None
             glfw.poll_events()
             gl.glClearColor(0, 0, 0, 1.0)
             gl.glClear(
@@ -612,18 +920,20 @@ class SLAM_GUI:
             self.g_camera.update_resolution(self.window.size.height, w)
             self.g_renderer.set_render_reso(w, self.window.size.height)
             frustum = create_frustum(
-                np.linalg.inv(cv_gl @ self.widget3d.scene.camera.get_view_matrix())
+                np.linalg.inv(
+                    cv_gl @ self.widget3d.scene.camera.get_view_matrix())
             )
 
             self.g_camera.position = frustum.eye.astype(np.float32)
             self.g_camera.target = frustum.center.astype(np.float32)
             self.g_camera.up = frustum.up.astype(np.float32)
 
-            self.gaussians_gl.xyz = self.gaussian_cur.get_xyz.cpu().numpy()
-            self.gaussians_gl.opacity = self.gaussian_cur.get_opacity.cpu().numpy()
-            self.gaussians_gl.scale = self.gaussian_cur.get_scaling.cpu().numpy()
-            self.gaussians_gl.rot = self.gaussian_cur.get_rotation.cpu().numpy()
-            self.gaussians_gl.sh = self.gaussian_cur.get_features.cpu().numpy()[:, 0, :]
+            self.gaussians_gl.xyz = self.gaussian_cur.gaussians.get_xyz.cpu().numpy()
+            self.gaussians_gl.opacity = self.gaussian_cur.gaussians.get_opacity.cpu().numpy()
+            self.gaussians_gl.scale = self.gaussian_cur.gaussians.get_scaling.cpu().numpy()
+            self.gaussians_gl.rot = self.gaussian_cur.gaussians.get_rotation.cpu().numpy()
+            self.gaussians_gl.sh = self.gaussian_cur.gaussians.get_features.cpu().numpy()[
+                :, 0, :]
 
             self.update_activated_renderer_state(self.gaussians_gl)
             self.g_renderer.sort_and_update(self.g_camera)
@@ -633,7 +943,7 @@ class SLAM_GUI:
                 0, 0, width, height, gl.GL_RGB, gl.GL_UNSIGNED_BYTE
             )
             img = np.frombuffer(bufferdata, np.uint8, -1).reshape(height, width, 3)
-            cv2.flip(img, 0, img)
+            cv2.flip(img, 0)
             render_img = o3d.geometry.Image(img)
             glfw.swap_buffers(self.window_gl)
         else:
@@ -652,15 +962,18 @@ class SLAM_GUI:
         if not self.init:
             return
         current_cam = self.get_current_cam()
-        results = self.rasterise(current_cam)
-        if results is None:
-            return
-        self.render_img = self.render_o3d_image(results, current_cam)
+        results = None
+        if self.gui_active_chbox.checked:
+            results = self.rasterise(current_cam)
+        self.render_img = self.render_o3d_image(results, current_cam) 
         self.widget3d.scene.set_background([0, 0, 0, 1], self.render_img)
 
     def scene_update(self):
+        self.rendered_frames += 1
         self.receive_data(self.q_main2vis)
         self.render_gui()
+        if (self.capture_video_switch.is_on):
+            self.write_rendered_image(self.rendered_frames)
 
     def _update_thread(self):
         while True:
@@ -668,6 +981,11 @@ class SLAM_GUI:
             self.step += 1
             if self.process_finished:
                 o3d.visualization.gui.Application.instance.quit()
+                # stop video writers if running
+                if self.video_writer_gui is not None:
+                    self.video_writer_gui.end_recording()
+                if self.video_writer_3dgs is not None:
+                    self.video_writer_3dgs.end_recording()
                 Log("Closing Visualization", tag="GUI")
                 break
 
@@ -679,6 +997,7 @@ class SLAM_GUI:
                     self.step = 0
 
             gui.Application.instance.post_to_main_thread(self.window, update)
+        Log("Visualization thread ended", tag="GUI")
 
 
 def run(params_gui=None):
@@ -686,6 +1005,7 @@ def run(params_gui=None):
     app.initialize()
     win = SLAM_GUI(params_gui)
     app.run()
+    Log("Application run finished", tag="GUI")
 
 
 def main():

@@ -1,0 +1,12 @@
+inherit_from: configs/rgb/rgb_config.yml
+Dataset:
+  camera: "X4 Low"
+  Calibration:
+    cx: 960.0
+    cy: 1920.0
+    depth_scale: 1.0
+    height: 1920
+    width: 3840
+  dataset_path: ./data/indoor_real_world/insta360x4_X4/direct_mount_Direct/Low_02_exploration_Ex/
+  inv_depth: false
+  image_downsample: 2

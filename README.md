@@ -1,183 +1,134 @@
-[comment]: <> (# Gaussian Splatting SLAM)
-
-<!-- PROJECT LOGO -->
+<h1 align="center">ODGS-SLAM: Omnidirectional Gaussian Splatting SLAM</h1>
 
 <p align="center">
-
-  <h1 align="center"> Gaussian Splatting SLAM
-  </h1>
-  <p align="center">
-    <a href="https://muskie82.github.io/"><strong>*Hidenobu Matsuki</strong></a>
-    ·
-    <a href="https://rmurai.co.uk/"><strong>*Riku Murai</strong></a>
-    ·
-    <a href="https://www.imperial.ac.uk/people/p.kelly/"><strong>Paul H.J. Kelly</strong></a>
-    ·
-    <a href="https://www.doc.ic.ac.uk/~ajd/"><strong>Andrew J. Davison</strong></a>
-  </p>
-  <p align="center">(* Equal Contribution)</p>
-
-  <h3 align="center"> CVPR 2024 (Highlight)</h3>
-
-
-
-[comment]: <> (  <h2 align="center">PAPER</h2>)
-  <h3 align="center"><a href="https://arxiv.org/abs/2312.06741">Paper</a> | <a href="https://youtu.be/x604ghp9R_Q?si=nYoWr8h2Xh-6L_KN">Video</a> | <a href="https://rmurai.co.uk/projects/GaussianSplattingSLAM/">Project Page</a></h3>
-  <div align="center"></div>
-
-<p align="center">
-  <a href="">
-    <img src="./media/teaser.gif" alt="teaser" width="100%">
-  </a>
-  <a href="">
-    <img src="./media/gui.jpg" alt="gui" width="100%">
-  </a>
+<strong>Stefan Spiss, Joey Hieronimy, Marcel Ritter, Matthias Harders</strong>
 </p>
+
 <p align="center">
-This software implements dense SLAM system presented in our paper <a href="https://arxiv.org/abs/2312.06741">Gaussian Splatting SLAM</a> in CVPR'24.
-The method demonstrates the first monocular SLAM solely based on 3D Gaussian Splatting (left), which also supports Stereo/RGB-D inputs (middle/right).
+<a href="https://odgs-slam.github.io/">Project Page</a>
 </p>
-<br>
 
-# Note
-- In an academic paper, please refer to our work as **Gaussian Splatting SLAM** or **MonoGS** for short (this repo's name) to avoid confusion with other works.
-- Differential Gaussian Rasteriser with camera pose gradient computation is available [here](https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git).
-- **[New]** Speed-up version of our code is available in `dev.speedup` branch, It achieves up to 10fps on monocular fr3/office sequence while keeping consistent performance (tested on RTX4090/i9-12900K). The code will be merged into the main branch after further refactoring and testing.
+---
 
-# Getting Started
+<p align="center">
+<strong>ODGS-SLAM</strong> is a dense visual SLAM system that brings 3D Gaussian Splatting to full 360° panoramic image sequences. It takes equirectangular RGB or RGBD frames as input and uses a Gaussian map as the sole scene representation for both camera tracking and scene mapping. The SLAM logic lives in this repository; the differential omnidirectional Gaussian rasteriser is developed separately and included as a submodule (<a href="https://github.com/odgs-slam/omni-gaussian-rasterization-w-pose">source</a>).
+</p>
+
+---
+
 ## Installation
-```
-git clone https://github.com/muskie82/MonoGS.git --recursive
-cd MonoGS
-```
-Setup the environment.
-
-```
-conda env create -f environment.yml
-conda activate MonoGS
-```
-Depending on your setup, please change the dependency version of pytorch/cudatoolkit in `environment.yml` by following [this document](https://pytorch.org/get-started/previous-versions/).
-
-Our test setup were:
-- Ubuntu 20.04: `pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6`
-- Ubuntu 18.04: `pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3`
-
-## Quick Demo
-```
-bash scripts/download_tum.sh
-python slam.py --config configs/mono/tum/fr3_office.yaml
-```
-You will see a GUI window pops up.
-
-## Downloading Datasets
-Running the following scripts will automatically download datasets to the `./datasets` folder.
-### TUM-RGBD dataset
-```bash
-bash scripts/download_tum.sh
-```
-
-### Replica dataset
-```bash
-bash scripts/download_replica.sh
-```
-
-### EuRoC MAV dataset
-```bash
-bash scripts/download_euroc.sh
-```
-
-
-
-## Run
-### Monocular
-```bash
-python slam.py --config configs/mono/tum/fr3_office.yaml
-```
-
-### RGB-D
-```bash
-python slam.py --config configs/rgbd/tum/fr3_office.yaml
-```
 
 ```bash
-python slam.py --config configs/rgbd/replica/office0.yaml
+git clone https://github.com/odgs-slam/odgs-slam.git --recursive
+cd odgs-slam
 ```
-Or the single process version as
+
+Set up the environment:
+
 ```bash
-python slam.py --config configs/rgbd/replica/office0_sp.yaml
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install submodules/simple-knn
+pip install submodules/diff-gaussian-rasterization
+pip install submodules/omni-gaussian-rasterization
 ```
 
+`requirements.txt` pins the exact package versions used for the paper's evaluation runs on the system specified in the Reproducibility section. For a looser installation without pinned versions, use `requirements_general.txt` instead.
 
-### Stereo (experimental)
+Depending on the system, it might be required to apply some small patches to the submodules (see files `submodules/simple-knn_glog-and-flt-limits.patch`, `submodules/diff-gaussian-rasterization_glog-and-cstdint.patch`, `submodules/omni-gaussian-rasterization_glog-and-cstdint.patch`)
+
+---
+
+## Running the System
+
+Configuration files for all sequences are provided in `./configs`, organized into `./configs/rgb/` and `./configs/rgbd/` for RGB and RGBD modes respectively. Detailed descriptions of the parameters can be found in `./configs/base_config.yml`.
+
+Download the dataset from [here](https://researchdata.uibk.ac.at/records/z6f6r-sjc65) and place the unzipped folder in `./data/`.
+
+Examples using the synthetic room exploration sequence:
+
+### RGB
 ```bash
-python slam.py --config configs/stereo/euroc/mh02.yaml
+python slam.py --config configs/rgb/rgb_render_ex_r1.yml
 ```
 
-## Live demo with Realsense
-First, you'll need to install `pyrealsense2`.
-Inside the conda environment, run:
+### RGBD
 ```bash
-pip install pyrealsense2
+python slam.py --config configs/rgbd/rgbd_render_ex_r1.yml
 ```
-Connect the realsense camera to the PC on a **USB-3** port and then run:
+
+All other sequences can be run by substituting the corresponding config files.
+
+To enable/disable the GUI, set the `use_gui` flag under the `Results` section in `./configs/base_config.yml` or in the sequence-specific config file.
+
+### Evaluation
+
+Add the `--eval` flag to run in headless mode, save results, and log rendering and tracking metrics:
+
 ```bash
-python slam.py --config configs/live/realsense.yaml
+python slam.py --config configs/rgb/rgb_render_ex_r1.yml --eval
 ```
-We tested the method with [Intel Realsense d455](https://www.mouser.co.uk/new/intel/intel-realsense-depth-camera-d455/). We recommend using a similar global shutter camera for robust camera tracking. Please avoid aggressive camera motion, especially before the initial BA is performed. Check out [the first 15 seconds of our YouTube video](https://youtu.be/x604ghp9R_Q?si=S21HgeVTVfNe0BVL) to see how you should move the camera for initialisation. We recommend to use the code in `dev.speed-up` branch for live demo.
 
-<p align="center">
-  <a href="">
-    <img src="./media/realsense.png" alt="teaser" width="50%">
-  </a>
-</p>
+Logged metrics include tracking accuracy (ATE RMSE) and rendering quality (PSNR, SSIM, LPIPS).
 
-# Evaluation
-<!-- To evaluate the method, please run the SLAM system with `save_results=True` in the base config file. This setting automatically outputs evaluation metrics in wandb and exports log files locally in save_dir. For benchmarking purposes, it is recommended to disable the GUI by setting `use_gui=False` in order to maximise GPU utilisation. For evaluating rendering quality, please set the `eval_rendering=True` flag in the configuration file. -->
-To evaluate our method, please add `--eval` to the command line argument:
-```bash
-python slam.py --config configs/mono/tum/fr3_office.yaml --eval
-```
-This flag will automatically run our system in a headless mode, and log the results including the rendering metrics.
+---
 
-# Reproducibility
-There might be minor differences between the released version and the results in the paper. Please bear in mind that multi-process performance has some randomness due to GPU utilisation.
-We run all our experiments on an RTX 4090, and the performance may differ when running with a different GPU.
+## Evaluation Setup
 
-# Acknowledgement
-This work incorporates many open-source codes. We extend our gratitude to the authors of the software.
+Results may differ slightly from those reported in the paper due to multi-process non-determinism from GPU utilisation. All reported experiments were run on workstations with Intel Core i7-9700K CPUs, with 32 GiB RAM and Nvidia RTX 4090 GPUs.
+
+The main evaluation was run on a workstation with the following detailed specifications and the package version, as specified in `requirements.txt`:
+
+| Component | Version |
+|-----------|---------|
+| OS | Ubuntu 22.04 |
+| Python | 3.10.12 |
+| CUDA | 12.6.85 |
+| PyTorch | 2.5.1 |
+| CPU | Intel Core i7-9700K @ 3.60GHz |
+| GPU | NVIDIA GeForce RTX 4090 |
+| RAM | 32 GiB |
+
+
+---
+
+## Acknowledgements
+
+This work builds upon and was inspired by several open-source projects. We would like to thank the authors and contributors of these repositories for making their work available.
+
+- [Gaussian Splatting SLAM (MonoGS)](https://github.com/muskie82/MonoGS)
+- [ODGS](https://github.com/esw0116/ODGS)
+- [GS-SLAM](https://github.com/yanchi-3dv/diff-gaussian-rasterization-for-gsslam)
 - [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting)
-- [Differential Gaussian Rasterization
-](https://github.com/graphdeco-inria/diff-gaussian-rasterization)
-- [SIBR_viewers](https://gitlab.inria.fr/sibr/sibr_core)
+- [Differential Gaussian Rasterization](https://github.com/graphdeco-inria/diff-gaussian-rasterization)
+- [Differential Gaussian Rasterization w/ Pose](https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git)
 - [Tiny Gaussian Splatting Viewer](https://github.com/limacv/GaussianSplattingViewer)
 - [Open3D](https://github.com/isl-org/Open3D)
-- [Point-SLAM](https://github.com/eriksandstroem/Point-SLAM)
 
-# License
-MonoGS is released under a **LICENSE.md**. For a list of code dependencies which are not property of the authors of MonoGS, please check **Dependencies.md**.
+See `Dependencies.md` for more details.
 
-# Citation
-If you found this code/work to be useful in your own research, please considering citing the following:
+---
+
+## License
+
+This repository builds on [Gaussian Splatting SLAM (MonoGS)](https://github.com/muskie82/MonoGS) (commit 6c9254c) as its base. Use of this software is subject to the [LICENSE.md](LICENSE.md) issued by Imperial College London, which permits non-commercial academic research use only. See also the original MonoGS license [here](https://github.com/muskie82/MonoGS/blob/main/LICENSE.md)
+
+Licenses of other dependencies used in the project can be found in `Dependencies.md`.
+
+---
+
+## Citation
+
+If you find this work useful in your research, please consider citing:
 
 ```bibtex
-@inproceedings{Matsuki:Murai:etal:CVPR2024,
-  title={{G}aussian {S}platting {SLAM}},
-  author={Hidenobu Matsuki and Riku Murai and Paul H. J. Kelly and Andrew J. Davison},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  year={2024}
+@InProceedings{Spiss_2026_CVPR,
+    author    = {Spiss, Stefan and Hieronimy, Joey and Ritter, Marcel and Harders, Matthias},
+    title     = {{ODGS-SLAM}: {O}mnidirectional {G}aussian {S}platting {SLAM}},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    month     = {June},
+    year      = {2026},
+    pages     = {26114-26123}
 }
-
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-

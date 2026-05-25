@@ -1,0 +1,19 @@
+inherit_from: configs/rgbd/rgbd_config.yml
+Dataset:
+  Calibration:
+    cx: 960.0
+    cy: 1920.0
+    depth_scale: 1.0
+    height: 1920
+    width: 3840
+  dataset_path: ./data/outdoor_synthetic/renders_outdoor_exploration_Ex/PanoramaCam/
+  inv_depth: false
+  image_downsample: 4
+Training:
+  kf_cutoff: 0.7
+  kf_remove_interval: 12
+  kf_remove_min_dist: 7.5
+  tracking_itr_num: 100
+  lr:
+    cam_rot_delta: 0.003                                    # LR for camera rotation delta
+    cam_trans_delta: 0.005                                 # LR for camera translation delta

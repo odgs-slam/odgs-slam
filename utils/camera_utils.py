@@ -23,7 +23,7 @@ class Camera(nn.Module):
         image_width,
         device="cuda:0",
     ):
-        super(Camera, self).__init__()
+        super().__init__()
         self.uid = uid
         self.device = device
 
@@ -46,13 +46,6 @@ class Camera(nn.Module):
         self.image_height = image_height
         self.image_width = image_width
 
-        self.cam_rot_delta = nn.Parameter(
-            torch.zeros(3, requires_grad=True, device=device)
-        )
-        self.cam_trans_delta = nn.Parameter(
-            torch.zeros(3, requires_grad=True, device=device)
-        )
-
         self.exposure_a = nn.Parameter(
             torch.tensor([0.0], requires_grad=True, device=device)
         )
@@ -61,6 +54,13 @@ class Camera(nn.Module):
         )
 
         self.projection_matrix = projection_matrix.to(device=device)
+
+        self.cam_q_w2c = nn.Parameter(
+            torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=device), requires_grad=True
+        )
+        self.cam_t_w2c = nn.Parameter(
+            torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=device), requires_grad=True
+        )
 
     @staticmethod
     def init_from_dataset(dataset, idx, projection_matrix):
@@ -111,14 +111,18 @@ class Camera(nn.Module):
         self.R = R.to(device=self.device)
         self.T = t.to(device=self.device)
 
+    def reset_qt(self):
+        self.cam_q_w2c.data.copy_(torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device))
+        self.cam_t_w2c.data.copy_(torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=self.device))
+
     def compute_grad_mask(self, config):
         edge_threshold = config["Training"]["edge_threshold"]
 
         gray_img = self.original_image.mean(dim=0, keepdim=True)
         gray_grad_v, gray_grad_h = image_gradient(gray_img)
-        mask_v, mask_h = image_gradient_mask(gray_img)
-        gray_grad_v = gray_grad_v * mask_v
-        gray_grad_h = gray_grad_h * mask_h
+        mask = image_gradient_mask(gray_img)
+        gray_grad_v = gray_grad_v * mask
+        gray_grad_h = gray_grad_h * mask
         img_grad_intensity = torch.sqrt(gray_grad_v**2 + gray_grad_h**2)
 
         if config["Dataset"]["type"] == "replica":
@@ -147,8 +151,8 @@ class Camera(nn.Module):
         self.depth = None
         self.grad_mask = None
 
-        self.cam_rot_delta = None
-        self.cam_trans_delta = None
+        self.cam_q_w2c = None
+        self.cam_t_w2c = None
 
         self.exposure_a = None
         self.exposure_b = None

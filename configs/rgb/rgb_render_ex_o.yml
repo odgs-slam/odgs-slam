@@ -1,0 +1,14 @@
+inherit_from: configs/rgb/rgb_config.yml
+Dataset:
+  Calibration:
+    cx: 960.0
+    cy: 1920.0
+    depth_scale: 1.0
+    height: 1920
+    width: 3840
+  dataset_path: ./data/outdoor_synthetic/renders_outdoor_exploration_Ex/PanoramaCam/
+  inv_depth: false
+  image_downsample: 4
+Training:
+  kf_cutoff: 0.7
+  kf_remove_interval: 12

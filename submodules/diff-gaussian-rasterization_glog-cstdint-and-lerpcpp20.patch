@@ -1,0 +1,46 @@
+diff --git a/cuda_rasterizer/helper_math.h b/cuda_rasterizer/helper_math.h
+index 3e2f759..29219d5 100644
+--- a/cuda_rasterizer/helper_math.h
++++ b/cuda_rasterizer/helper_math.h
+@@ -826,7 +826,9 @@ inline __host__ __device__ uint4 max(uint4 a, uint4 b) {
+ // - linear interpolation between a and b, based on value t in [0, 1] range
+ ////////////////////////////////////////////////////////////////////////////////
+ 
++#if defined(__CUDA_ARCH__) || __cplusplus < 202002L
+ inline __device__ __host__ float lerp(float a, float b, float t) { return a + t * (b - a); }
++#endif
+ inline __device__ __host__ float2 lerp(float2 a, float2 b, float t) { return a + t * (b - a); }
+ inline __device__ __host__ float3 lerp(float3 a, float3 b, float t) { return a + t * (b - a); }
+ inline __device__ __host__ float4 lerp(float4 a, float4 b, float t) { return a + t * (b - a); }
+diff --git a/cuda_rasterizer/rasterizer_impl.h b/cuda_rasterizer/rasterizer_impl.h
+index bc3f0ec..9f7b06e 100644
+--- a/cuda_rasterizer/rasterizer_impl.h
++++ b/cuda_rasterizer/rasterizer_impl.h
+@@ -13,6 +13,7 @@
+ 
+ #include <iostream>
+ #include <vector>
++#include <cstdint>
+ #include "rasterizer.h"
+ #include <cuda_runtime_api.h>
+ 
+@@ -71,4 +72,4 @@ namespace CudaRasterizer
+ 		T::fromChunk(size, P);
+ 		return ((size_t)size) + 128;
+ 	}
+-};
+\ No newline at end of file
++};
+diff --git a/setup.py b/setup.py
+index bb7220d..8e4932d 100644
+--- a/setup.py
++++ b/setup.py
+@@ -26,7 +26,7 @@ setup(
+             "cuda_rasterizer/backward.cu",
+             "rasterize_points.cu",
+             "ext.cpp"],
+-            extra_compile_args={"nvcc": ["-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")]})
++            extra_compile_args={"nvcc": ["-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/"), "-DGLOG_USE_GLOG_EXPORT"], "cxx": ["-DGLOG_USE_GLOG_EXPORT"]})
+         ],
+     cmdclass={
+         'build_ext': BuildExtension

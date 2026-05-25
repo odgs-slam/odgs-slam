@@ -1,0 +1,11 @@
+inherit_from: configs/rgb/rgb_config.yml
+Dataset:
+  Calibration:
+    cx: 960.0
+    cy: 1920.0
+    depth_scale: 1.0
+    height: 1920
+    width: 3840
+  dataset_path: ./data/indoor_room_synthetic/renders_room_retracing_Rt/PanoramaCam
+  inv_depth: false
+  image_downsample: 2

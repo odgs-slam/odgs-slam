@@ -17,9 +17,9 @@ import torch
 
 
 class BasicPointCloud(NamedTuple):
-    points: np.array
-    colors: np.array
-    normals: np.array
+    points: np.ndarray
+    colors: np.ndarray
+    normals: np.ndarray
 
 
 def getWorld2View(R, t):
@@ -30,13 +30,20 @@ def getWorld2View(R, t):
     return np.float32(Rt)
 
 
-def getWorld2View2(R, t, translate=torch.tensor([0.0, 0.0, 0.0]), scale=1.0):
-    translate = translate.to(R.device)
+def getWorld2View2(R, t, translate=None, scale=1.0):
     Rt = torch.zeros((4, 4), device=R.device)
     # Rt[:3, :3] = R.transpose()
     Rt[:3, :3] = R
     Rt[:3, 3] = t
     Rt[3, 3] = 1.0
+
+    if translate is None and abs(scale - 1.0) < 1e-8:
+        return Rt
+
+    if translate is None:
+        translate = torch.tensor([0.0, 0.0, 0.0], device=R.device)
+    else:
+        translate = translate.to(R.device)
 
     C2W = torch.linalg.inv(Rt)
     cam_center = C2W[:3, 3]
@@ -47,8 +54,8 @@ def getWorld2View2(R, t, translate=torch.tensor([0.0, 0.0, 0.0]), scale=1.0):
 
 
 def getProjectionMatrix(znear, zfar, fovX, fovY):
-    tanHalfFovY = math.tan((fovY / 2))
-    tanHalfFovX = math.tan((fovX / 2))
+    tanHalfFovY = math.tan(fovY / 2)
+    tanHalfFovX = math.tan(fovX / 2)
 
     top = tanHalfFovY * znear
     bottom = -top
@@ -91,7 +98,6 @@ def getProjectionMatrix2(znear, zfar, cx, cy, fx, fy, W, H):
     P[2, 3] = -(zfar * znear) / (zfar - znear)
 
     return P
-
 
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))

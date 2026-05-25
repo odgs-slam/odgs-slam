@@ -1,0 +1,10 @@
+inherit_from: configs/base_config.yml
+Dataset:
+  sensor_type: depth
+Results:
+  eval_rendering: true
+  save_dir: "results/rgbd"
+Training:  
+  size_threshold: 50                                        # Maximum size on screen threshold for pruning
+  kf_remove_min_dist: 0.75
+  kf_remove_similarity_threshold: 0.50

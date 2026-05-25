@@ -1,0 +1,86 @@
+Dataset:
+  Calibration:
+    distorted: false
+    fx: 500.0
+    fy: 500.0
+    k1: 0.0
+    k2: 0.0
+    k3: 0.0
+    p1: 0.0
+    p2: 0.0
+  adaptive_pointsize: true                                  # Adapts point size to depth scale
+  pcd_downsample: 32                                        # Downsampling factor for the point cloud
+  pcd_downsample_init: 32                                   # Downsampling factor for the point cloud during initialization
+  point_size: 0.01                                          # Only relevant if not adaptive
+  type: panorama                                            # Type of dataset, currently only panorama supported
+  start_frame: 0                                            # First frame to be processed
+ #max_num_frames: 1000000                                   # Max number of frames to be processed
+Results:
+  eval_rendering: true                                      # Whether to render the scene from the GT trajectory for evaluation 
+  save_results: true                                        # Whether to save the results after finishing the SLAM process
+  save_trj: true                                            # Whether to save the estimated trajectory
+  save_trj_kf_intv: 25                                      # Interval of keyframes to save trajectories
+  use_gui: false                                            # Whether to use the GUI to visualize the SLAM process
+  exit_gui_on_finish: false                                 # Whether to exit the program when the SLAM process finishes or keep the GUI open
+  exit_on_gui_close: true                                   # Whether to exit the program when the GUI window is closed 
+  use_wandb: false
+  color_refine: false                                       # Whether to refine colors after all frames have been processed
+Training:
+  edge_threshold: 1.1                                       # Threshold to be exceeded to be detected as an edge and included in tracking loss
+  gaussian_extent: 1.0                                      # The extent of the scene, used to scale and filter points; Larger -> more clone, less split, less prune ; Smaller -> less clone, more split, more prune
+  gaussian_reset: 2001                                      # Reset the gaussian opacity every this iter
+  gaussian_th: 0.7                                          # Minimum opacity threshold for pruning
+  gaussian_update_every: 150                                # Densify and prune every this iter
+  gaussian_update_offset: 50                                # Offset for densification and pruning iterations
+  init_gaussian_extent: 30                                  # The extent of the scene, used to scale and filter points during initialization
+  init_gaussian_reset: 500                                  # Reset the gaussian opacity every this iter during initialization
+  init_gaussian_th: 0.005                                   # Minimum opacity threshold for pruning during initialization
+  init_gaussian_update: 100                                 # Densify and prune every this iter during initialization
+  init_itr_num: 1050                                        # Number of iterations to initialize the map
+  kf_cutoff: 0.7                                            # Ratio of overlap to be below to immediately add keyframe
+  kf_interval: 5                                            # Min number of frames between keyframes
+  kf_min_translation: 0.02                                  # Min translation needed to add keyframe
+  kf_overlap: 0.9                                           # Ratio of overlap to be below to be able to add keyframe
+  kf_translation: 0.05                                      # Keyframe added after this translation
+  lr:
+    cam_rot_delta: 0.003                                    # LR for camera rotation delta
+    cam_trans_delta: 0.001                                  # LR for camera translation delta
+  mapping_itr_num: 50                                       # Number of mapping iterations
+  pose_window: 3                                            # Number of past poses to consider for tracking
+  prune_mode: slam                                          # Mode for pruning
+  rgb_boundary_threshold: 0.01                              # Pixels below are filtered out as low intensity
+  depth_boundary_threshold: 0.01                            # Pixels below are filtered out as too close
+  opacity_boundary_threshold: 0.95                          # Threshold to indicate min opacity for valid pixels
+  single_thread: false                                     
+  spherical_harmonics: false
+  tracking_itr_num: 50                                      # Max number of tracking iterations
+  window_size: 8                                            # Number of past keyframes considered for mapping and tracking
+  kf_remove_interval: 12                                    # Number of new keyframes before keyframe removal procedure is run
+model_params:
+  data_device: cuda
+  model_path: ''
+  resolution: -1
+  sh_degree: 0
+  source_path: ''
+  white_background: false
+opt_params:                                                 # Parameters for the Gaussian and camera position optimization
+  densification_interval: 100
+  densify_from_iter: 500
+  densify_grad_threshold: 7.5e-5                            # Maximum gradient threshold for densification (lower -> more dense)
+  densify_until_iter: 15000
+  feature_lr: 0.0025
+  iterations: 30000
+  lambda_dssim: 0.2
+  opacity_lr: 0.05
+  opacity_reset_interval: 3000
+  percent_dense: 0.01
+  position_lr_delay_mult: 0.01
+  position_lr_final: 0.0000016
+  position_lr_init: 0.0016
+  position_lr_max_steps: 30000
+  rotation_lr: 0.001
+  scaling_lr: 0.001
+pipeline_params:
+  compute_cov3D_python: false
+  convert_SHs_python: false
+  random_seed: 0

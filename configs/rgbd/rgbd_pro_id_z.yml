@@ -1,0 +1,12 @@
+inherit_from: configs/rgbd/rgbd_config.yml
+Dataset:
+  camera: "Pro"
+  Calibration:
+    cx: 480.0
+    cy: 960.0
+    depth_scale: 1000.0
+    height: 960
+    width: 1920
+  dataset_path: ./data/indoor_real_world/insta360pro_Pro/01_backforth_ID-Z/PanoramaCam/
+  inv_depth: true
+  image_downsample: 1

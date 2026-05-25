@@ -1,0 +1,54 @@
+diff --git a/setup.py b/setup.py
+index 580d2bd..7142482 100644
+--- a/setup.py
++++ b/setup.py
+@@ -13,7 +13,9 @@ from setuptools import setup
+ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
+ import os
+ 
+-cxx_compiler_flags = []
++nvcc_compiler_flags = ["-DGLOG_USE_GLOG_EXPORT"]
++# cxx_compiler_flags = []
++cxx_compiler_flags = ["-DGLOG_USE_GLOG_EXPORT"]
+ 
+ if os.name == 'nt':
+     cxx_compiler_flags.append("/wd4624")
+@@ -27,7 +29,7 @@ setup(
+             "spatial.cu", 
+             "simple_knn.cu",
+             "ext.cpp"],
+-            extra_compile_args={"nvcc": [], "cxx": cxx_compiler_flags})
++            extra_compile_args={"nvcc": nvcc_compiler_flags, "cxx": cxx_compiler_flags})
+         ],
+     cmdclass={
+         'build_ext': BuildExtension
+diff --git a/simple_knn.cu b/simple_knn.cu
+index e72e4c9..86e0c2d 100644
+--- a/simple_knn.cu
++++ b/simple_knn.cu
+@@ -23,6 +23,7 @@
+ #define __CUDACC__
+ #include <cooperative_groups.h>
+ #include <cooperative_groups/reduce.h>
++#include <float.h>
+ 
+ namespace cg = cooperative_groups;
+ 
+@@ -218,4 +219,4 @@ void SimpleKNN::knn(int P, float3* points, float* meanDists)
+ 	boxMeanDist << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get(), meanDists);
+ 
+ 	cudaFree(result);
+-}
+\ No newline at end of file
++}
+diff --git a/spatial.h b/spatial.h
+index 280c953..6e4491a 100644
+--- a/spatial.h
++++ b/spatial.h
+@@ -11,4 +11,4 @@
+ 
+ #include <torch/extension.h>
+ 
+-torch::Tensor distCUDA2(const torch::Tensor& points);
+\ No newline at end of file
++torch::Tensor distCUDA2(const torch::Tensor& points);
