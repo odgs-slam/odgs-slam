@@ -1,21 +1,20 @@
 
+import gc
 import glob
 import json
 import os
-import gc
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
-
 from scipy.spatial.transform import Rotation as R
 
 from gaussian_splatting.utils.graphics_utils import focal2fov
 
 try:
-    import OpenEXR
     import Imath
+    import OpenEXR
     HAS_OPENEXR = True
 except ImportError:
     HAS_OPENEXR = False
@@ -30,12 +29,80 @@ class PanoramaParser:
             glob.glob(f"{self.input_folder}/depth/*.exr"))
         self.n_img = len(self.color_paths)
         self.transforms = self.load_transform()
+        
+    def _calculate_transform_cam(self, position, euler_angles, camera_type, use_legacy=False):
+        if use_legacy:
+            if camera_type == "X4 Stick":
+                # Subtract pi/2 from z (cVamera mounted sideways)
+                euler_angles = np.array([euler_angles['x'] + np.pi, euler_angles['z'] - np.pi/2, -euler_angles['y']])
+                rot_matrix = R.from_euler('xyz', euler_angles, degrees=False).as_matrix()
+            elif camera_type == "X4 Low":
+                # Add pi/2 from z (camera mounted other sideways)
+                euler_angles = np.array([euler_angles['x'] + np.pi, euler_angles['z'] + np.pi/2, -euler_angles['y']])
+                rot_matrix = R.from_euler('xyz', euler_angles, degrees=False).as_matrix()
+            elif camera_type == "Pro":
+                # Add 2.5pi/4 from z (camdera mounted at an angle)
+                euler_angles = np.array([euler_angles['x'] + np.pi, euler_angles['z'] - 2.5 * np.pi/4, -euler_angles['y']])
+                rot_matrix = R.from_euler('xyz', euler_angles, degrees=False).as_matrix()
+            else:
+                raise ValueError("Unknown camera type")
+            pose = np.eye(4)
+            pose[:3, :3] = rot_matrix
+            pose[:3, 3] = [position['x'] / 1000, position['y'] / 1000, position['z'] / 1000]
+        else:
+            euler_xyz = np.array([euler_angles['x'], euler_angles['y'], euler_angles['z']])
+            rot_matrix_mocap = R.from_euler("xyz", euler_xyz, degrees=False).as_matrix()
+            mocap_to_internal = np.diag([-1.0, -1.0, 1.0])
+
+            if camera_type == "X4 Stick":
+                # Camera is mounted at +90 degree angle around the robot vertical axis.
+                camera_mount = R.from_euler("y", np.pi / 2, degrees=False).as_matrix()
+            elif camera_type == "X4 Low":
+                # Camera is mounted at -90 degree angle around the robot vertical axis.
+                camera_mount = R.from_euler("y", -np.pi / 2, degrees=False).as_matrix()
+            elif camera_type == "Pro":
+                # Camera is mounted at a 67.5 degree angle around the robot vertical axis.
+                camera_mount = R.from_euler("y", np.pi / 4 * 1.5, degrees=False).as_matrix()
+            else:
+                raise ValueError("Unknown camera type")
+            rot_matrix = rot_matrix_mocap @ camera_mount @ mocap_to_internal
+            pose = np.eye(4)
+            pose[:3, :3] = rot_matrix
+            pose[:3, 3] = [position['x'] / 1000, position['y'] / 1000, position['z'] / 1000]
+            
+        return np.linalg.inv(pose)
+    
+    def _calculate_transform_blender(self, position, euler_angles, use_legacy=False):
+        if use_legacy:
+            # Convert Blender's Z-up, -Y forward system to SLAM's Z-forward frame.  
+            # Adjust signs, swap Y/Z, and use 'xzy' order for correct rotation. 
+            euler_angles = np.array([-euler_angles['x'], euler_angles['z'], -euler_angles['y']])
+            rot_matrix = R.from_euler('xzy', euler_angles, degrees=False).as_matrix()
+
+            pose = np.eye(4)
+            pose[:3, :3] = rot_matrix
+            pose[:3, 3] = [position['x'], position['y'], position['z']]
+        else:
+            euler_xyz = np.array([euler_angles['x'], euler_angles['y'], euler_angles['z']])
+            rot_matrix_blender = R.from_euler("xyz", euler_xyz, degrees=False).as_matrix()
+            blender_to_internal = np.diag([1.0, -1.0, -1.0])
+            # blender_to_internal = np.array([
+            #     [1.0, 0.0, 0.0],
+            #     [0.0, 0.0, -1.0],
+            #     [0.0, 1.0, 0.0],
+            # ])
+            rot_matrix = rot_matrix_blender @ blender_to_internal
+            pose = np.eye(4)
+            pose[:3, :3] = rot_matrix
+            pose[:3, 3] = [position['x'], position['y'], position['z']]
+
+        return np.linalg.inv(pose) 
     
     def load_transform(self):
         json_path = f"{self.input_folder}/positions/PanoramaCam_positions.json"
         if not os.path.exists(json_path):
             return None
-        with open(json_path, 'r') as file:
+        with open(json_path) as file:
             data = json.load(file)
 
         transforms = []
@@ -43,40 +110,9 @@ class PanoramaParser:
             position = entry["position"]
             euler_angles = entry["rotation"]
             if self.camera is not None:
-                # Flip x and negate y for coordinate system adjustment
-                # Convert position from mm to meters
-                if self.camera == "X4 Stick":
-                    # Subtract pi/2 from z (camera mounted sideways)
-                    euler_angles = np.array([euler_angles['x'] + np.pi, euler_angles['z'] - np.pi/2, -euler_angles['y']])
-                    rot_matrix = R.from_euler('xyz', euler_angles, degrees=False).as_matrix()
-                elif self.camera == "X4 Low":
-                    # Add pi/2 from z (camera mounted other sideways)
-                    euler_angles = np.array([euler_angles['x'] + np.pi, euler_angles['z'] + np.pi/2, -euler_angles['y']])
-                    rot_matrix = R.from_euler('xyz', euler_angles, degrees=False).as_matrix()
-                elif self.camera == "Pro":
-                    # Add 2.5pi/4 from z (camdera mounted at an angle)
-                    euler_angles = np.array([euler_angles['x'] + np.pi, euler_angles['z'] - 2.5 * np.pi/4, -euler_angles['y']])
-                    rot_matrix = R.from_euler('xyz', euler_angles, degrees=False).as_matrix()
-                else:
-                    raise ValueError("Unknown camera type")
-                
-                pose = np.eye(4)
-                pose[:3, :3] = rot_matrix
-                pose[:3, 3] = [position['x'] / 1000, position['y'] / 1000, position['z'] / 1000]
-
-                transforms.append(np.linalg.inv(pose))
+                transforms.append(self._calculate_transform_cam(position, euler_angles, camera_type=self.camera, use_legacy=False))
             else:
-                # Convert Blender's Z-up, -Y forward system to SLAM's Z-forward frame.  
-                # Adjust signs, swap Y/Z, and use 'xzy' order for correct rotation. 
-                euler_angles = np.array([-euler_angles['x'], euler_angles['z'], -euler_angles['y']])
-                rot_matrix = R.from_euler('xzy', euler_angles, degrees=False).as_matrix()
-
-                pose = np.eye(4)
-                pose[:3, :3] = rot_matrix
-                pose[:3, 3] = [position['x'], position['y'], position['z']]
-
-                # Extrinsics from camera to world, inverse of camera pose
-                transforms.append(np.linalg.inv(pose))
+                transforms.append(self._calculate_transform_blender(position, euler_angles, use_legacy=False))
         return transforms
 
 
@@ -92,88 +128,15 @@ class BaseDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.num_imgs
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> tuple[torch.Tensor, np.ndarray | None, torch.Tensor]: # type: ignore
         pass
 
-
-class MonocularDataset(BaseDataset):
-    def __init__(self, args, path, config):
-        super().__init__(args, path, config)
-        calibration = config["Dataset"]["Calibration"]
-        # Camera prameters
-        self.fx = calibration["fx"]
-        self.fy = calibration["fy"]
-        self.cx = calibration["cx"]
-        self.cy = calibration["cy"]
-        self.width = calibration["width"]
-        self.height = calibration["height"]
-        self.fovx = focal2fov(self.fx, self.width)
-        self.fovy = focal2fov(self.fy, self.height)
-        self.K = np.array(
-            [[self.fx, 0.0, self.cx], [0.0, self.fy, self.cy], [0.0, 0.0, 1.0]]
-        )
-        # distortion parameters
-        self.disorted = calibration["distorted"]
-        self.dist_coeffs = np.array(
-            [
-                calibration["k1"],
-                calibration["k2"],
-                calibration["p1"],
-                calibration["p2"],
-                calibration["k3"],
-            ]
-        )
-        self.map1x, self.map1y = cv2.initUndistortRectifyMap(
-            self.K,
-            self.dist_coeffs,
-            np.eye(3),
-            self.K,
-            (self.width, self.height),
-            cv2.CV_32FC1,
-        )
-        # depth parameters
-        self.has_depth = True if "depth_scale" in calibration.keys() else False
-        self.depth_scale = calibration["depth_scale"] if self.has_depth else None
-
-        # Default scene scale
-        nerf_normalization_radius = 5
-        self.scene_info = {
-            "nerf_normalization": {
-                "radius": nerf_normalization_radius,
-                "translation": np.zeros(3),
-            },
-        }
-
-    def __getitem__(self, idx):
-        color_path = self.color_paths[idx]
-        pose = self.poses[idx]
-
-        image = np.array(Image.open(color_path))
-        depth = None
-
-        if self.disorted:
-            image = cv2.remap(image, self.map1x, self.map1y, cv2.INTER_LINEAR)
-
-        if self.has_depth:
-            depth_path = self.depth_paths[idx]
-            depth = np.array(Image.open(depth_path)) / self.depth_scale
-
-        image = (
-            torch.from_numpy(image / 255.0)
-            .clamp(0.0, 1.0)
-            .permute(2, 0, 1)
-            .to(device=self.device, dtype=self.dtype)
-        )
-        pose = torch.from_numpy(pose).to(device=self.device)
-        return image, depth, pose
-
-
-
-class PanoramaDataset(MonocularDataset):
+class PanoramaDataset(BaseDataset):
     def __init__(self, args, path, config, max_num_frames=None, start_frame=0):
         super().__init__(args, path, config)
         self.dataset_path = config["Dataset"]["dataset_path"]
-        camera = config["Dataset"]["camera"] if "camera" in config["Dataset"].keys() else None
+        camera = config["Dataset"].get("camera", None)
+
         parser = PanoramaParser(self.dataset_path, camera)
         
         # Apply start_frame and max_num_frames
@@ -190,16 +153,22 @@ class PanoramaDataset(MonocularDataset):
         self.depth_paths = parser.depth_paths[start_idx:end_idx]
         self.transforms = parser.transforms[start_idx:end_idx] if parser.transforms else None
 
-        self.inv_depth = config["Dataset"]["inv_depth"] if "inv_depth" in config["Dataset"].keys() else False
-        self.image_downsample = config["Dataset"]["image_downsample"] if "image_downsample" in config["Dataset"].keys() else 1
+        self.inv_depth = config["Dataset"].get("inv_depth", False)
+        self.image_downsample = config["Dataset"].get("image_downsample", 1)
         self.sensor_type = config["Dataset"]["sensor_type"]
 
         self.width = config["Dataset"]["Calibration"]["width"] // self.image_downsample
         self.height = config["Dataset"]["Calibration"]["height"] // self.image_downsample
-        self.fx = config["Dataset"]["Calibration"]["fx"]
-        self.fy = config["Dataset"]["Calibration"]["fy"]
+        self.fx = config["Dataset"]["Calibration"]["fx"] // self.image_downsample
+        self.fy = config["Dataset"]["Calibration"]["fy"] // self.image_downsample 
         self.cx = config["Dataset"]["Calibration"]["cx"] // self.image_downsample
         self.cy = config["Dataset"]["Calibration"]["cy"] // self.image_downsample
+        self.fovx = focal2fov(self.fx, self.width)
+        self.fovy = focal2fov(self.fy, self.height)
+
+        # depth parameters
+        self.has_depth = self.depth_paths is not None and len(self.depth_paths) > 0
+        self.depth_scale = config["Dataset"]["Calibration"].get("depth_scale", 1.0)
 
         torch.backends.cudnn.benchmark = True
     
@@ -237,6 +206,9 @@ class PanoramaDataset(MonocularDataset):
         color_path = self.color_paths[idx]
         transform = self.transforms[idx] if self.transforms is not None else np.eye(4)
 
+        # Adjust translation to account for depth scale (if using depth)
+        transform[:3, 3] = transform[:3, 3] / self.depth_scale
+
         image = np.array(Image.open(color_path), dtype=np.uint8)
         
         if image.ndim == 3 and image.shape[2] == 4:
@@ -246,9 +218,6 @@ class PanoramaDataset(MonocularDataset):
             image = image[::self.image_downsample, ::self.image_downsample]
         
         depth = None
-
-        if self.disorted:
-            image = cv2.remap(image, self.map1x, self.map1y, cv2.INTER_LINEAR)
 
         if self.has_depth and idx < len(self.depth_paths) and self.sensor_type == "depth":
             depth_path = self.depth_paths[idx]
