@@ -10,6 +10,7 @@ import torch
 from evo.core import metrics
 from evo.core.trajectory import PosePath3D
 from matplotlib import pyplot as plt
+from tqdm import tqdm
 
 matplotlib.use('Agg')
 import wandb
@@ -17,8 +18,9 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from gaussian_splatting.gaussian_renderer import render_spherical
 from gaussian_splatting.utils.image_utils import psnr
-from gaussian_splatting.utils.loss_utils import ssim
+from gaussian_splatting.utils.loss_utils import masked_lpips, masked_ssim, ssim
 from gaussian_splatting.utils.system_utils import mkdir_p
+from utils.camera_utils import Camera
 from utils.logging_utils import Log
 
 
@@ -37,7 +39,7 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     ape_metric.process_data(data)
     ape_stat = ape_metric.get_statistic(metrics.StatisticsType.rmse)
     ape_stats = ape_metric.get_all_statistics()
-    Log("RMSE ATE \[m]", ape_stat, tag="Eval")
+    Log("RMSE ATE [m]", ape_stat, tag="Eval")
 
     with open(
         os.path.join(plot_dir, f"stats_{str(label)}.json"),
@@ -167,8 +169,11 @@ def eval_rendering(
         frame = frames[idx]
         gt_image, _, _ = dataset[idx]
 
-        rendering = render_spherical(frame, gaussians, pipe, background)["render"]
-        image = torch.clamp(rendering, 0.0, 1.0)
+        rendering = render_spherical(frame, gaussians, pipe, background, mapping_mode=False, tracking_mode=False)
+        if rendering is None or "render" not in rendering:
+            Log(f"Rendering failed for frame {idx}, skipping PSNR/SSIM/LPIPS calculation.", tag="Warning")
+            continue
+        image = torch.clamp(rendering['render'], 0.0, 1.0)
 
         gt = (gt_image.cpu().numpy().transpose(
             (1, 2, 0)) * 255).astype(np.uint8)
@@ -210,6 +215,115 @@ def eval_rendering(
              "w", encoding="utf-8"),
         indent=4,
     )
+    return output
+
+def eval_rendering_out_of_core(
+    gaussians,
+    dataset,
+    poses,
+    frame_indices,
+    save_dir,
+    pipe,
+    background,
+    iteration="final",
+    write_ith_frame=0
+):
+    psnr_array, ssim_array, lpips_array = [], [], []
+    cal_lpips = LearnedPerceptualImagePatchSimilarity(
+        net_type="alex", normalize=True
+    ).to("cuda")
+    psnr_masked_array, ssim_masked_array, lpips_masked_input_array, lpips_masked_array = [], [], [], []
+
+    Log(f"Starting rendering evaluation for {len(frame_indices)} frames.", tag="Eval")
+    Log(f"Number of frames = {len(poses)}", tag="Eval")
+    
+    counter = 0
+    with torch.no_grad():
+        for fid, (T, R) in tqdm(zip(frame_indices, poses, strict=True), total=len(frame_indices)):
+            gt_image, gt_depth, gt_pose = dataset[fid]
+
+            render_cam = Camera(
+                fid,
+                None,
+                None,
+                gt_pose,
+                torch.eye(4),
+                dataset.fx,
+                dataset.fy,
+                dataset.cx,
+                dataset.cy,
+                dataset.fovx,
+                dataset.fovy,
+                dataset.height,
+                dataset.width,
+                device=dataset.device,
+            )
+            render_cam.update_RT(torch.tensor(R), torch.tensor(T))
+            render_cam.clean()
+
+            rendering = render_spherical(render_cam, gaussians, pipe, background, mapping_mode=False, tracking_mode=False)
+            if rendering is None or "render" not in rendering:
+                Log(f"Rendering failed for frame {fid}, skipping PSNR/SSIM/LPIPS calculation.", tag="Warning")
+                continue
+            image = torch.clamp(rendering['render'], 0.0, 1.0)
+
+            mask = gt_image > 0
+
+            psnr_score = psnr((image).unsqueeze(0), (gt_image).unsqueeze(0))
+            ssim_score = ssim((image).unsqueeze(0), (gt_image).unsqueeze(0))
+            lpips_score = cal_lpips((image).unsqueeze(0), (gt_image).unsqueeze(0))
+
+            psnr_array.append(psnr_score.item())
+            ssim_array.append(ssim_score.item())
+            lpips_array.append(lpips_score.item())
+
+            psnr_masked_score = psnr((image[mask]).unsqueeze(0), gt_image[mask].unsqueeze(0))
+            ssim_masked_score = masked_ssim((image).unsqueeze(0), (gt_image).unsqueeze(0), mask.unsqueeze(0))
+            masked_img = image * mask
+            masked_gt = gt_image * mask
+            lpips_masked_input_score = cal_lpips(masked_img.unsqueeze(0), masked_gt.unsqueeze(0))
+            lpips_masked_score = masked_lpips(image.unsqueeze(0), gt_image.unsqueeze(0), mask.unsqueeze(0))
+            
+            psnr_masked_array.append(psnr_masked_score.item())
+            ssim_masked_array.append(ssim_masked_score.item())
+            lpips_masked_input_array.append(lpips_masked_input_score.item())
+            lpips_masked_array.append(lpips_masked_score.item())
+
+            if write_ith_frame > 0 and counter % write_ith_frame == 0:
+                pred = (image.detach().cpu().numpy().transpose((1, 2, 0)) * 255).astype(
+                    np.uint8
+                )
+                gt = (gt_image.cpu().numpy().transpose(
+                    (1, 2, 0)) * 255).astype(np.uint8)
+                pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
+                gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
+
+                img_save_dir = os.path.join(save_dir, "rendered_images", str(iteration))
+                mkdir_p(img_save_dir)
+                cv2.imwrite(os.path.join(img_save_dir, f"frame_{fid}_pred.png"), pred)
+                cv2.imwrite(os.path.join(img_save_dir, f"frame_{fid}_gt.png"), gt)
+            counter += 1
+
+
+    output = dict()
+    output["mean_psnr"] = float(np.mean(psnr_array))
+    output["mean_ssim"] = float(np.mean(ssim_array))
+    output["mean_lpips"] = float(np.mean(lpips_array))
+    output["mean_psnr_masked"] = float(np.mean(psnr_masked_array))
+    output["mean_ssim_masked"] = float(np.mean(ssim_masked_array))
+    output["mean_lpips_masked_input"] = float(np.mean(lpips_masked_input_array))
+    output["mean_lpips_masked"] = float(np.mean(lpips_masked_array))
+
+    Log(
+        f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_lpips"]}',
+        tag="Eval",
+    )
+
+    psnr_save_dir = os.path.join(save_dir, "psnr", str(iteration))
+    mkdir_p(psnr_save_dir)
+
+    with open(os.path.join(psnr_save_dir, 'final_result.json'), 'w', encoding='utf-8') as f:
+        json.dump(output, f, indent=4)
     return output
 
 

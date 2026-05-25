@@ -59,6 +59,16 @@ def create_window(window_size, channel):
     return window
 
 
+def masked_lpips(image, gt_image, mask):
+    lpips_model = lpips.LPIPS(net='alex', verbose=False, spatial=True).to(image.device)
+    lpips_map = lpips_model(image, gt_image)
+    
+    if mask.size(1) == 1 and lpips_map.size(1) > 1:
+        mask = mask.expand(lpips_map)
+    masked_lpips_map = lpips_map * mask
+    return masked_lpips_map.sum() / mask.sum().clamp(min=1e-10)
+
+
 def ssim(img1, img2, window_size=11, size_average=True):
     channel = img1.size(-3)
     window = create_window(window_size, channel)
@@ -67,10 +77,30 @@ def ssim(img1, img2, window_size=11, size_average=True):
         window = window.cuda(img1.get_device())
     window = window.type_as(img1)
 
-    return _ssim(img1, img2, window, window_size, channel, size_average)
+    ssim_map = _ssim(img1, img2, window, window_size, channel)
+    if size_average:
+        return ssim_map.mean()
+    else:
+        return ssim_map.mean(1).mean(1).mean(1)
 
 
-def _ssim(img1, img2, window, window_size, channel, size_average=True):
+def masked_ssim(img1, img2, mask, window_size=11):
+    channel = img1.size(-3)
+    window = create_window(window_size, channel)
+
+    if img1.is_cuda:
+        window = window.cuda(img1.get_device())
+    window = window.type_as(img1)
+
+    ssim_map = _ssim(img1, img2, window, window_size, channel)
+    
+    if mask.size(1) == 1 and channel > 1:
+        mask = mask.expand(ssim_map)
+    masked_ssim_map = ssim_map * mask
+    return masked_ssim_map.sum() / mask.sum().clamp(min=1e-10)
+
+
+def _ssim(img1, img2, window, window_size, channel):
     mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
     mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
 
@@ -96,7 +126,4 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
     )
 
-    if size_average:
-        return ssim_map.mean()
-    else:
-        return ssim_map.mean(1).mean(1).mean(1)
+    return ssim_map
