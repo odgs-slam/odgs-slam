@@ -301,7 +301,7 @@ class BackEnd(mp.Process):
                                 )
                             if to_prune is not None:
                                 self.gaussians.prune_points(to_prune.cuda())
-                                for idx in range((len(current_window))):
+                                for idx in range(len(current_window)):
                                     current_idx = current_window[idx]
                                     self.occ_aware_visibility[current_idx] = (
                                         self.occ_aware_visibility[current_idx][~to_prune]
@@ -605,9 +605,10 @@ class BackEnd(mp.Process):
                     indices_to_remove = data[1]
                     for idx in indices_to_remove:
                         if idx in self.viewpoints:
+                            self.viewpoints[idx].clean()
                             del self.viewpoints[idx]
-                            torch.cuda.empty_cache()
-                            gc.collect()
+                    torch.cuda.empty_cache()
+                    gc.collect()
                     self.current_window = [idx for idx in self.current_window if idx not in indices_to_remove]
                 else:
                     raise Exception("Unprocessed data", data)

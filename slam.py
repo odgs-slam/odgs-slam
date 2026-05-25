@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -130,10 +131,27 @@ class SLAM:
         end.record()
         torch.cuda.synchronize()
         # empty the frontend queue
-        N_frames = len(self.frontend.cameras)
+        # N_frames = len(self.frontend.cameras)
+        N_frames = len(self.frontend.poses)
         FPS = N_frames / (start.elapsed_time(end) * 0.001)
         Log("Total time", start.elapsed_time(end) * 0.001, tag="Eval")
         Log("Total FPS", N_frames / (start.elapsed_time(end) * 0.001), tag="Eval")
+
+        # save final run stats
+        if self.save_dir is not None and self.config['Results']['save_results']:
+            run_stats = {
+                'total_time_sec': start.elapsed_time(end) * 0.001,
+                'total_frames': N_frames,
+                'fps': FPS,
+            }
+
+            mkdir_p(self.save_dir)
+            with open(
+                os.path.join(self.save_dir, 'final_run_stats.json'),
+                'w',
+                encoding='utf-8',
+            ) as f:
+                json.dump(run_stats, f, indent=4)
 
         if self.eval_rendering:
             if N_frames >= 2:

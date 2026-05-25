@@ -158,9 +158,8 @@ class FrontEnd(mp.Process):
         depth_map = self.add_new_keyframe(cur_frame_idx, init=True)
         self.request_init(cur_frame_idx, viewpoint, depth_map)
         self.reset = False
-
-    def tracking(self, cur_frame_idx: int, viewpoint: Camera):
-        Log(f"Tracking frame: {cur_frame_idx}", tag="Frontend")
+        
+    def init_new_frame_pose_constant_motion(self, cur_frame_idx: int, viewpoint: Camera) -> tuple[torch.Tensor, torch.Tensor]:
         # Constant motion assumption based on weighted average of last 3 motions
         if len(self.cameras) > 4:
             weights = [0.5, 0.3, 0.2] # sum must be 1
@@ -202,8 +201,7 @@ class FrontEnd(mp.Process):
             W2C_curr = delta_avg @ W2C_prev
             R_new = W2C_curr[:3, :3]
             T_new = W2C_curr[:3, 3]
-            
-            viewpoint.update_RT(R_new, T_new)
+            return R_new, T_new
         elif len(self.cameras) > 2:
             # If not enough frames are available, use simple constant motion
             prev = self.cameras[cur_frame_idx - 1]
@@ -215,11 +213,18 @@ class FrontEnd(mp.Process):
             W2C_curr = delta_Rt @ W2C_prev
             R_new = W2C_curr[:3, :3]
             T_new = W2C_curr[:3, 3]
-            viewpoint.update_RT(R_new, T_new)
+            return R_new, T_new
         else:
             # first frame cannot be initialized with constant motion
             prev = self.cameras[cur_frame_idx - 1]
-            viewpoint.update_RT(prev.R, prev.T)
+            return prev.R, prev.T
+
+
+    def tracking(self, cur_frame_idx: int, viewpoint: Camera):
+        Log(f"Tracking frame: {cur_frame_idx}", tag="Frontend")
+
+        R_new, T_new = self.init_new_frame_pose_constant_motion(cur_frame_idx, viewpoint)
+        viewpoint.update_RT(R_new, T_new)
 
         opt_params = []
         opt_params.append(
@@ -304,6 +309,7 @@ class FrontEnd(mp.Process):
             (cur_frame_idx, viewpoint.R.detach().clone().cpu(), viewpoint.T.detach().clone().cpu(), viewpoint.R_gt.detach().clone().cpu(), viewpoint.T_gt.detach().clone().cpu())
             )
         return render_pkg
+
 
     def is_keyframe(
         self,
@@ -637,13 +643,12 @@ class FrontEnd(mp.Process):
                     cur_frame_idx += 1
                     continue
 
-                current_window_dict = {}
-                current_window_dict[self.current_window[0]
-                                    ] = self.current_window[1:]
-                keyframes = [self.cameras[kf_idx]
-                             for kf_idx in self.current_window]
-
                 if self.use_gui and self.gui_active:
+                    current_window_dict = {}
+                    current_window_dict[self.current_window[0]
+                                        ] = self.current_window[1:]
+                    keyframes = [self.cameras[kf_idx]
+                                 for kf_idx in self.current_window]
                     self.q_main2vis.put(
                         gui_utils.GaussianPacket(
                             gaussians=self.gaussians if self.gaussians.get_xyz.shape[0] > 0 else None,
@@ -664,16 +669,16 @@ class FrontEnd(mp.Process):
                               last_keyframe_idx) >= self.kf_interval
                 curr_visibility = (render_pkg["n_touched"] > 0).long()
                 
-                window_full = len(self.current_window) < self.window_size
+                window_not_full = len(self.current_window) < self.window_size
 
                 create_kf = self.is_keyframe(
                     cur_frame_idx,
                     last_keyframe_idx,
                     curr_visibility,
                     self.occ_aware_visibility,
-                    window_full                 # if there were not enough frames seen yet (< window_size) we do not perform a overlap check
+                    window_not_full,  # if there were not enough frames seen yet (< window_size) we perform distance-based keyframe selection too.
                 )
-                if self.single_thread or window_full:
+                if self.single_thread or window_not_full:
                     create_kf = check_time and create_kf
                 if create_kf:
                     self.current_window, removed = self.add_to_window(

@@ -115,7 +115,7 @@ def render_pinhole(
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     if mask is not None:
-        rendered_image, radii, depth, opacity = rasterizer(
+        rendered_image, radii, depth, opacity, n_touched = rasterizer(
             means3D=means3D[mask],
             means2D=means2D[mask],
             shs=shs[mask] if shs is not None else None,
@@ -127,7 +127,6 @@ def render_pinhole(
             theta=None,
             rho=None,
         )
-        n_touched = None
     else:
         rendered_image, radii, depth, opacity, n_touched = rasterizer(
             means3D=means3D,

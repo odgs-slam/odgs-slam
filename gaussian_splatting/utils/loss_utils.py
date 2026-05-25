@@ -16,10 +16,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
+import lpips
 
 
 def l1_loss(network_output, gt):
-    return torch.abs((network_output - gt)).mean()
+    return torch.abs(network_output - gt).mean()
 
 
 def l1_loss_weight(network_output, gt):
